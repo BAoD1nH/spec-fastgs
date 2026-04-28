@@ -17,7 +17,6 @@ venv/
 .idea/
 
 # Bỏ qua các file cài đặt và file hệ thống
-*.sh
 *.deb
 *.exe
 *.iso
