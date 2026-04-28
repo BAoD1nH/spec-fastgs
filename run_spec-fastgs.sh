@@ -6,7 +6,7 @@
 # CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=stump python train.py -s ./datasets/mipnerf360/stump -m ./output_spec_fastgs/stump -i images --eval --densification_interval 500 --optimizer_type default --test_iterations 30000
 # CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=treehill python train.py -s ./datasets/mipnerf360/treehill -m ./output_spec_fastgs/treehill -i images --eval --densification_interval 500 --optimizer_type default --test_iterations 30000
 # CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=room python train.py -s ./datasets/mipnerf360/room -m ./output_spec_fastgs/room -i images --eval --densification_interval 500 --optimizer_type default --test_iterations 30000
-CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=counter python train.py -s ./datasets/mipnerf360/counter -m ./output_spec_fastgs/counter -i images_4  --eval --densification_interval 500 --optimizer_type default --iterations 5000 --test_iterations 30000
+CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=counter python train.py -s ./datasets/mipnerf360/counter -m ./output_spec_fastgs/counter -i images_4  --eval --densification_interval 500 --optimizer_type default --iterations 30000 --test_iterations 30000
 # CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=kitchen python train.py -s ./datasets/mipnerf360/kitchen -m ./output_spec_fastgs/kitchen -i images --eval --densification_interval 500 --optimizer_type default --test_iterations 30000
 # CUDA_VISIBLE_DEVICES=0 OAR_JOB_ID=bonsai python train.py -s ./datasets/mipnerf360/bonsai -m ./output_spec_fastgs/bonsai -i images --eval --densification_interval 500 --optimizer_type default --test_iterations 30000
 

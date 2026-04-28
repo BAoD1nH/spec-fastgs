@@ -29,12 +29,16 @@ def main():
     gaussians = GaussianModel(model.sh_degree, optimizer_type="default")
     scene = Scene(model.extract(args), gaussians, load_iteration=args.iteration, shuffle=True)
     freeze_gaussians(gaussians)
-    
+
     # Background color
     bg = torch.tensor([0,0,0], device="cuda", dtype=torch.float32)
 
     # Detect specular Gaussians
     specular_mask = detect_specular_gaussians(scene, gaussians, pipe.extract(args), bg, mult).cuda()
+    if specular_mask.sum() == 0:
+        print("No specular Gaussians detected. Exiting.")
+        return
+
     print(f"Detected {specular_mask.float().mean().item()*100:.2f}% Gaussians as Specular.")
 
     # Init specular

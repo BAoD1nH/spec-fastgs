@@ -50,7 +50,8 @@ def render_set(
             pipeline,
             background,
             args.mult,
-            specular_model=specular_model   # <<< TRUYỀN XUỐNG
+            specular_model=specular_model,
+            get_flag=True
         )
 
         rendering = render_pkg["render"]

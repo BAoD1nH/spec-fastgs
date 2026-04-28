@@ -1,30 +1,135 @@
-# fastgs/specular/specular_detector.py
-
 import torch
-import numpy as np
+import math
 from gaussian_renderer import render_fastgs
 from utils.fast_utils import sampling_cameras
-from .specular_config import *
-from utils.loss_utils import l1_loss
 
+def pixel_to_world_ray(camera, x, y):
+    W = camera.image_width
+    H = camera.image_height
 
-@torch.no_grad()
-def detect_specular_gaussians(scene, gaussians, pipeline, background, mult):
+    ndc_x = (x + 0.5) / W * 2.0 - 1.0
+    ndc_y = (y + 0.5) / H * 2.0 - 1.0
+    ndc_y = -ndc_y
+
+    tan_half_fovx = math.tan(camera.FoVx * 0.5)
+    tan_half_fovy = math.tan(camera.FoVy * 0.5)
+
+    ray_cam = torch.tensor(
+        [
+            ndc_x * tan_half_fovx,
+            ndc_y * tan_half_fovy,
+            1.0
+        ],
+        device="cuda"
+    )
+    ray_cam = ray_cam / torch.norm(ray_cam)
+
+    R = camera.world_view_transform[:3, :3].T
+    ray_dir = R @ ray_cam
+    ray_dir = ray_dir / torch.norm(ray_dir)
+
+    ray_origin = camera.camera_center
+    return ray_origin, ray_dir
+
+def gaussian_ray_distance(gaussians_xyz, ray_origin, ray_dir):
     """
-    Detect Gaussians with VIEW-DEPENDENT STRUCTURED residual (specular/reflective).
+    Compute distance from all Gaussians to a ray.
+    gaussians_xyz: [N, 3]
+    ray_origin: [3]
+    ray_dir: normalized [3]
+    """
+    v = gaussians_xyz - ray_origin
+    cross = torch.cross(v, ray_dir)
+    return torch.norm(cross, dim=1)
+
+# --------------------------------------------------
+# 1. Pixel-level spotlight detection
+# --------------------------------------------------
+def detect_pixel_spotlights(render_img, gt_img, topk_ratio=0.001):
+    """
+    Detect pixel-level specular hotspots.
+
+    Args:
+        render_img: Tensor [3, H, W]
+        gt_img:     Tensor [3, H, W]
 
     Returns:
-        specular_mask: BoolTensor [N]
+        hotspot_mask: BoolTensor [H, W]
+    """
+    # L1 error per pixel
+    pixel_err = torch.mean(torch.abs(render_img - gt_img), dim=0)  # [H, W]
+
+    # Top-k pixels (peak-based)
+    flat = pixel_err.view(-1)
+    k = max(1, int(topk_ratio * flat.numel()))
+    thresh = torch.topk(flat, k=k, largest=True).values.min()
+
+    hotspot_mask = pixel_err >= thresh
+    return hotspot_mask
+
+
+# --------------------------------------------------
+# 2. Pixel -> Gaussian assignment
+# --------------------------------------------------
+def assign_pixels_to_gaussians_by_ray(
+    hotspot_mask,
+    camera,
+    gaussians_xyz,
+    max_dist=0.05
+):
+    """
+    hotspot_mask: [H, W] bool
+    gaussians_xyz: [N, 3]
+
+    Returns:
+        gaussian_votes: [N]
+    """
+    N = gaussians_xyz.shape[0]
+    votes = torch.zeros(N, device="cuda")
+
+    ys, xs = torch.where(hotspot_mask)
+
+    for y, x in zip(ys, xs):
+        ray_o, ray_d = pixel_to_world_ray(camera, x.item(), y.item())
+
+        # Compute distance to all Gaussians
+        dists = torch.norm(
+            torch.cross(gaussians_xyz - ray_o, ray_d),
+            dim=1
+        )
+
+        g = torch.argmin(dists)
+        if dists[g] < max_dist:
+            votes[g] += 1
+
+    return votes
+
+# --------------------------------------------------
+# 3. Orchestrator
+# --------------------------------------------------
+@torch.no_grad()
+def detect_specular_gaussians(
+    scene,
+    gaussians,
+    pipeline,
+    background,
+    mult,
+    topk_ratio=0.001,
+    min_pixel_count=10,
+    max_ray_dist=0.05
+):
+    """
+    Pixel-space spotlight detection + ray-based Gaussian assignment
     """
 
     device = gaussians.get_xyz.device
-    N = gaussians.get_xyz.shape[0]
+    gaussians_xyz = gaussians.get_xyz
+    num_gaussians = gaussians_xyz.shape[0]
 
-    # Collect per-Gaussian error across views
-    per_view_errors = []
+    gaussian_votes = torch.zeros(num_gaussians, device=device)
 
     cameras = sampling_cameras(scene.getTrainCameras().copy())
-    cameras = cameras[:NUM_SAMPLE_VIEWS]
+    cameras = cameras[:8]  # đủ để thấy view-dependence
 
     for cam in cameras:
         pkg = render_fastgs(
@@ -35,70 +140,33 @@ def detect_specular_gaussians(scene, gaussians, pipeline, background, mult):
             mult
         )
 
-        render_img = pkg["render"]                  # [3,H,W]
-        gt_img = cam.original_image[:3].to(device) # [3,H,W]
-        visibility = pkg["visibility_filter"].squeeze()
+        render_img = pkg["render"]
+        gt_img = cam.original_image[:3].to(device)
 
-        # Pixel L1 error (mean over RGB)
-        pixel_err = torch.mean(torch.abs(render_img - gt_img), dim=0)  # [H,W]
+        # ---- Pixel-level spotlight detection ----
+        pixel_err = torch.mean(torch.abs(render_img - gt_img), dim=0)
+        flat = pixel_err.view(-1)
 
-        # Binary mask of high-error pixels
-        high_err_mask = (pixel_err > PIXEL_ERROR_THRESH)
+        k = max(1, int(topk_ratio * flat.numel()))
+        thresh = torch.topk(flat, k=k).values.min()
+        hotspot_mask = pixel_err >= thresh
 
-        # For each Gaussian: does it contribute to any high-error pixel?
-        g_err = torch.zeros((N,), device=device)
-        if visibility.numel() > 0:
-            flat_err = pixel_err.view(-1)  # [H*W]
+        ys, xs = torch.where(hotspot_mask)
 
-            k = max(1, int(0.001 * flat_err.numel()))  # top 0.1% pixels
-            topk_err = torch.topk(flat_err, k=k, largest=True).values
-            
-            local_view_score = topk_err.mean() / max(len(visibility), 1)  # Normalize by visibility count
+        # ---- Ray -> Gaussian assignment ----
+        for y, x in zip(ys, xs):
+            ray_o, ray_d = pixel_to_world_ray(cam, x.item(), y.item())
+            dists = gaussian_ray_distance(gaussians_xyz, ray_o, ray_d)
 
-            g_err[visibility] = local_view_score
+            g = torch.argmin(dists)
+            if dists[g] < max_ray_dist:
+                gaussian_votes[g] += 1
 
-        per_view_errors.append(g_err)
+    specular_mask = gaussian_votes >= min_pixel_count
 
-    # [num_views, N] -> [N, num_views]
-    E = torch.stack(per_view_errors, dim=1)
-
-    # ---- Statistics per Gaussian ----
-    mean_e = torch.mean(E, dim=1)
-    var_e = torch.var(E, dim=1)
-    max_e = torch.max(E, dim=1).values
-
-    peak_ratio = max_e / (mean_e + 1e-6)
-    active_views = (E > 0).sum(dim=1)
-
-    # ---- Core specular conditions ----
-    specular_candidate = (
-        (active_views >= MIN_VIEWS_FOR_STATS) &
-        (var_e >= VARIANCE_THRESH) &
-        (peak_ratio >= PEAK_RATIO_THRESH)
+    print(
+        f"[Specular-Detect] {specular_mask.float().mean()*100:.2f}% "
+        f"Gaussians marked as specular"
     )
-
-    # ---- Enforce sparsity (TOP-K) ----
-    candidate_idx = torch.where(specular_candidate)[0]
-    max_keep = int(MAX_SPECULAR_RATIO * N)
-
-    if candidate_idx.numel() > max_keep:
-        scores = var_e[candidate_idx] * peak_ratio[candidate_idx]
-        topk = torch.topk(scores, k=max_keep).indices
-        final_idx = candidate_idx[topk]
-    else:
-        final_idx = candidate_idx
-
-    specular_mask = torch.zeros((N,), dtype=torch.bool, device=device)
-    specular_mask[final_idx] = True
-
-    if PRINT_STATS and specular_mask.any():
-        print(
-            f"[Specular-Detect] {specular_mask.float().mean()*100:.2f}% "
-            f"Gaussians marked as specular | "
-            f"mean(VAR)={var_e[specular_mask].mean():.6f} | "
-            f"max(VAR)={var_e.max():.6f}"
-        )
-    elif PRINT_STATS:
-        print("[Specular-Detect] 0.00% Gaussians marked as specular")
 
     return specular_mask

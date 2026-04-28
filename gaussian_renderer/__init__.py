@@ -1,5 +1,3 @@
-# gaussian_renderer/__init__.py (Spec-FastGS version)
-
 import torch
 import math
 from scene.gaussian_model import GaussianModel
@@ -10,6 +8,7 @@ from diff_gaussian_rasterization_fastgs import (
 )
 from specular.normal_utils import compute_gaussian_normals
 
+
 def render_fastgs(
     viewpoint_camera,
     pc: GaussianModel,
@@ -18,42 +17,56 @@ def render_fastgs(
     mult,
     scaling_modifier=1.0,
     override_color=None,
-    get_flag=None,
-    metric_map=None,
-    specular_model=None,   # <<< THÊM
-    specular_mask=None,    # <<< THÊM
+    get_flag=False,                 # ✅ BẮT BUỘC cho pixel→Gaussian
+    metric_map=None,                # ✅ internal buffer
+    specular_model=None,
+    specular_mask=None,
     debug_specular_mask=False
 ):
     """
-    FastGS renderer with optional specular augmentation.
+    FastGS renderer with optional Specular (ASG) augmentation.
+    Extended to expose pixel -> Gaussian mapping for specular detection.
     """
 
-    # ========== Screen-space points (FastGS original) ==========
+    # ------------------------------------------------------------
+    # Screen-space placeholder (FastGS original)
+    # ------------------------------------------------------------
     screenspace_points = torch.zeros(
         (pc.get_xyz.shape[0], 4),
         dtype=pc.get_xyz.dtype,
         requires_grad=True,
         device="cuda"
     )
-
     try:
         screenspace_points.retain_grad()
     except:
         pass
 
+    # ------------------------------------------------------------
+    # Camera parameters
+    # ------------------------------------------------------------
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
+    H = int(viewpoint_camera.image_height)
+    W = int(viewpoint_camera.image_width)
+
+    # ------------------------------------------------------------
+    # ✅ Pixel → Gaussian ID buffer (BẮT BUỘC cho Cách A)
+    # ------------------------------------------------------------
     if metric_map is None:
         metric_map = torch.zeros(
-            int(viewpoint_camera.image_height * viewpoint_camera.image_width),
-            dtype=torch.int,
+            H * W,
+            dtype=torch.int32,
             device="cuda"
         )
 
+    # ------------------------------------------------------------
+    # Rasterizer settings
+    # ------------------------------------------------------------
     raster_settings = GaussianRasterizationSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
+        image_height=H,
+        image_width=W,
         tanfovx=tanfovx,
         tanfovy=tanfovy,
         bg=bg_color,
@@ -65,16 +78,18 @@ def render_fastgs(
         mult=mult,
         prefiltered=False,
         debug=pipe.debug,
-        get_flag=get_flag,
-        metric_map=metric_map
+        get_flag=get_flag,           # ✅ BẮT BUỘC
+        metric_map=metric_map        # ✅ BẮT BUỘC
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
+    # ------------------------------------------------------------
+    # Gaussian parameters
+    # ------------------------------------------------------------
     means3D = pc.get_xyz
     opacity = pc.get_opacity
 
-    # ========== Covariance ==========
     scales = None
     rotations = None
     cov3D_precomp = None
@@ -85,7 +100,9 @@ def render_fastgs(
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-    # ========== SH COLOR (FastGS original) ==========
+    # ------------------------------------------------------------
+    # SH color (FastGS original)
+    # ------------------------------------------------------------
     shs = None
     colors_precomp = None
 
@@ -103,16 +120,18 @@ def render_fastgs(
     else:
         colors_precomp = override_color
 
-    # ========== SPECULAR ADD-ON ==========
+    # ------------------------------------------------------------
+    # ✅ SPECULAR ADD-ON (ASG)
+    # ------------------------------------------------------------
     if specular_model is not None:
         with torch.set_grad_enabled(specular_model.training):
             viewdir = means3D - viewpoint_camera.camera_center[None, :]
             viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
 
-            # ⚠️ NORMAL TẠM THỜI – giữ đơn giản & ổn định
-            normal = compute_gaussian_normals(pc)  # [N, 3]
+            # ✅ normal hình học đúng
+            normal = compute_gaussian_normals(pc)
 
-            # ⚠️ FEAT TẠM THỜI (SpecularModel có thể dùng mask sau)
+            # ✅ feature placeholder (Phase 3 có thể mở rộng)
             feat = torch.zeros(
                 (means3D.shape[0], specular_model.feat_dim),
                 dtype=means3D.dtype,
@@ -121,22 +140,33 @@ def render_fastgs(
 
             specular_color = specular_model(feat, viewdir, normal)
 
+            # ✅ Chỉ bật ASG tại Gaussian được detect
             if specular_mask is not None:
                 specular_color[~specular_mask] = 0.0
 
-        alpha = 0.3 # Hệ số điều chỉnh cường độ phản xạ – có thể tinh chỉnh
-        specular_color = alpha * specular_color 
+        # ✅ strength control
+        alpha = 0.3
+        specular_color = alpha * specular_color
 
         if colors_precomp is not None:
             colors_precomp = colors_precomp + specular_color
         else:
             dc = dc + specular_color.unsqueeze(1)
-        
+
+        # --------------------------------------------------------
+        # ✅ DEBUG: visualize specular Gaussian mask
+        # --------------------------------------------------------
         if debug_specular_mask and specular_mask is not None:
             colors_precomp = torch.zeros_like(colors_precomp)
-            colors_precomp[specular_mask] = torch.tensor([1.0, 0.0, 0.0], device=colors_precomp.device, dtype=colors_precomp.dtype)  # red highlight for specular Gaussians
+            colors_precomp[specular_mask] = torch.tensor(
+                [1.0, 0.0, 0.0],
+                device=colors_precomp.device,
+                dtype=colors_precomp.dtype
+            )
 
-    # ========== Rasterize ==========
+    # ------------------------------------------------------------
+    # Rasterize
+    # ------------------------------------------------------------
     rendered_image, radii, accum_metric_counts = rasterizer(
         means3D=means3D,
         means2D=screenspace_points,
@@ -149,8 +179,12 @@ def render_fastgs(
         cov3D_precomp=cov3D_precomp
     )
 
+    # ------------------------------------------------------------
+    # ✅ OUTPUT (BẮT BUỘC cho Cách A)
+    # ------------------------------------------------------------
     return {
         "render": rendered_image,
+        "gaussian_index_map": metric_map.view(H, W),  # ✅ PIXEL → GAUSSIAN
         "viewspace_points": screenspace_points,
         "visibility_filter": (radii > 0).nonzero(),
         "radii": radii,
