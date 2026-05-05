@@ -158,15 +158,29 @@ def detect_specular_gaussians(
             ray_o, ray_d = pixel_to_world_ray(cam, x.item(), y.item())
             dists = gaussian_ray_distance(gaussians_xyz, ray_o, ray_d)
 
-            g = torch.argmin(dists)
-            if dists[g] < max_ray_dist:
-                gaussian_votes[g] += 1
+            K = 5  # top-5 closest Gaussians
+            topk_dists, topk_idx = torch.topk(dists, k=K, largest=False)
+            for dist, g in zip(topk_dists, topk_idx):
+                if dist < max_ray_dist:
+                    gaussian_votes[g] += 1
 
-    specular_mask = gaussian_votes >= min_pixel_count
+    # --------------------------------------------------
+    # Final selection: limit specular Gaussian ratio
+    # --------------------------------------------------
+    num_selected = (gaussian_votes > 0).sum().item()
+    max_keep = int(0.03 * num_gaussians)   # tối đa 3%
+
+    if num_selected > max_keep:
+        # Giữ top-k Gaussian có nhiều vote nhất
+        thresh = torch.topk(gaussian_votes, max_keep).values.min()
+        specular_mask = gaussian_votes >= thresh
+    else:
+        specular_mask = gaussian_votes >= min_pixel_count
 
     print(
         f"[Specular-Detect] {specular_mask.float().mean()*100:.2f}% "
-        f"Gaussians marked as specular"
+        f"Gaussians marked as specular "
+        f"(votes max={gaussian_votes.max().item():.0f})"
     )
 
     return specular_mask
