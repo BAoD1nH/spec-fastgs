@@ -1,47 +1,119 @@
-# fastgs/specular/specular_model.py
+# specular/specular_model.py
+# ============================================================
+# Specular Model (ASG)
+# First-class specular head for Specular-aware FastGS
+# ============================================================
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .spec_utils import RenderingEquationEncoding, ASGKernel, reflect
+
 
 class SpecularModel(nn.Module):
     """
-    Specular appearance as an additive term.
-    Input: latent feat (from Gaussian), viewdir, normal
-    Output: RGB specular [N,3]
+    Specular Appearance Gaussian (ASG)
+
+    This model predicts *true specular RGB* given:
+    - per-Gaussian latent specular code
+    - view direction
+    - surface normal
+
+    IMPORTANT:
+    - This is NOT a post-hoc residual model.
+    - Output is added directly to diffuse SH.
     """
-    def __init__(self, feat_dim=16, enc_levels=4):
+
+    def __init__(
+        self,
+        spec_feat_dim: int = 8,
+        hidden_dim: int = 64,
+        num_layers: int = 3,
+    ):
         super().__init__()
-        self.feat_dim = feat_dim
-        self.enc = RenderingEquationEncoding(3, enc_levels)
-        enc_dim = 3 * (1 + 2 * enc_levels)
-        self.color_head = nn.Sequential(
-            nn.Linear(feat_dim + 2 * enc_dim, 64),
-            nn.ReLU(True),
-            nn.Linear(64, 3),
-            nn.Tanh()
+
+        self.spec_feat_dim = spec_feat_dim
+
+        # Input:
+        #   spec_feat      : F
+        #   viewdir        : 3
+        #   normal         : 3
+        #   -------------------
+        #   total          : F + 6
+        input_dim = spec_feat_dim + 6
+
+        layers = []
+        dim = input_dim
+
+        for i in range(num_layers - 1):
+            layers.append(nn.Linear(dim, hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            dim = hidden_dim
+
+        # Final layer → RGB specular
+        layers.append(nn.Linear(dim, 3))
+
+        self.mlp = nn.Sequential(*layers)
+
+        self._init_weights()
+
+    # ------------------------------------------------------------
+    # Weight initialization
+    # ------------------------------------------------------------
+    def _init_weights(self):
+        """
+        Initialize weights conservatively so specular
+        does not explode early in training.
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+
+    # ------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------
+    def forward(
+        self,
+        spec_feat: torch.Tensor,
+        viewdir: torch.Tensor,
+        normal: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Args:
+            spec_feat : [N, F]   per-Gaussian latent specular code
+            viewdir   : [N, 3]   view direction (world space, normalized)
+            normal    : [N, 3]   surface normal (world space, normalized)
+
+        Returns:
+            specular_rgb : [N, 3]
+        """
+
+        # --------------------------------------------------------
+        # Safety normalization (important for stability)
+        # --------------------------------------------------------
+        viewdir = F.normalize(viewdir, dim=1)
+        normal = F.normalize(normal, dim=1)
+
+        # --------------------------------------------------------
+        # Concatenate inputs
+        # --------------------------------------------------------
+        h = torch.cat(
+            [
+                spec_feat,
+                viewdir,
+                normal
+            ],
+            dim=1
         )
-        self.asg = ASGKernel(in_dim=3 + 3 + feat_dim)
 
-    def forward(self, feat, viewdir, normal):
-        # Normalize
-        viewdir = F.normalize(viewdir, dim=-1)
-        normal = F.normalize(normal, dim=-1)
+        # --------------------------------------------------------
+        # Predict specular RGB
+        # --------------------------------------------------------
+        specular_rgb = self.mlp(h)
 
-        refl = reflect(viewdir, normal)
-        e_view = self.enc(viewdir)
-        e_refl = self.enc(refl)
+        # --------------------------------------------------------
+        # Optional: clamp or softplus
+        # We keep it linear here; range will be shaped by loss.
+        # --------------------------------------------------------
 
-        # ASG scalar lobe
-        lobe = self.asg(refl, normal, feat)  # [N,1]
-
-        rgb = self.color_head(torch.cat([feat, e_view, e_refl], dim=-1))
-        return rgb * lobe
-
-def freeze_module(m: nn.Module):
-    for p in m.parameters():
-        p.requires_grad_(False)
-
-def train_setting(model, lr=2e-4):
-    model.train()
-    return torch.optim.Adam(model.parameters(), lr=lr)
+        return specular_rgb

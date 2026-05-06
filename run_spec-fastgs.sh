@@ -20,26 +20,6 @@ CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/counter --skip_t
 # CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/kitchen --skip_train
 # CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/bonsai --skip_train
 
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/bicycle --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/flowers --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/garden --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/stump --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/treehill --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/room --spec_iters 3000
-CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/counter --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/kitchen --spec_iters 3000
-# CUDA_VISIBLE_DEVICES=0 python train_specular.py -m ./output_spec_fastgs/bonsai --spec_iters 3000
-
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/bicycle --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/flowers --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/garden --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/stump --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/treehill --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/room --skip_train --use_specular
-CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/counter --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/kitchen --skip_train --use_specular
-# CUDA_VISIBLE_DEVICES=0 python render.py -m ./output_spec_fastgs/bonsai --skip_train --use_specular
-
 # CUDA_VISIBLE_DEVICES=0 python metrics.py -m ./output_spec_fastgs/bicycle
 # CUDA_VISIBLE_DEVICES=0 python metrics.py -m ./output_spec_fastgs/flowers
 # CUDA_VISIBLE_DEVICES=0 python metrics.py -m ./output_spec_fastgs/garden
