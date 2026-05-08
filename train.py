@@ -23,6 +23,7 @@ from utils.image_utils import psnr
 
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from specular.specular_model import SpecularModel
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -52,6 +53,16 @@ def training(
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+
+    # ✅ INIT
+    specular_model = SpecularModel().cuda()
+    specular_model.train()
+    # ✅ OPTIMIZER
+    spec_optimizer = torch.optim.Adam(
+        specular_model.parameters(),
+        lr=1e-3
+    )
+
 
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -116,9 +127,15 @@ def training(
 
         # === RENDER (SPECULAR-AWARE) ===
         render_pkg = render_fastgs(
-            viewpoint_cam, gaussians, pipe, bg, opt.mult
+            viewpoint_cam, gaussians, pipe, bg, opt.mult, specular_model=specular_model
         )
 
+        # ✅ DEBUG SPECULAR
+        if iteration % 500 == 0:
+            print("specular mean:", render_pkg["specular"].abs().mean().item())
+
+            # Visualize specular
+            # specular_image = render_pkg["specular"]
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
         visibility_filter = render_pkg["visibility_filter"]
@@ -128,9 +145,18 @@ def training(
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # ✅ ADD SPECULAR LOSS (NGAY TẠI ĐÂY)
+        if "specular" in render_pkg:
+            spec_loss = torch.mean(render_pkg["specular"] ** 2)
+            loss = loss + 0.01 * spec_loss
+
         loss.backward()
 
+        spec_optimizer.step()
+        spec_optimizer.zero_grad()
         iter_end.record()
 
         with torch.no_grad():

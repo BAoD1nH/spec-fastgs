@@ -566,6 +566,85 @@ class GaussianModel:
         if self.tmp_radii is not None:
             self.tmp_radii = self.tmp_radii[valid_points_mask]
 
+    def cat_tensors_to_optimizer(self, tensors_dict):
+        optimizable_tensors = {}
+
+
+        optimizers = [self.optimizer]
+        if self.shoptimizer:
+            optimizers.append(self.shoptimizer)
+
+
+        for opt in optimizers:
+            for group in opt.param_groups:
+
+
+                name = group["name"]
+
+
+                # ✅ FIX: skip nếu không có tensor cần add
+                if name not in tensors_dict:
+                    continue
+
+
+                extension_tensor = tensors_dict[name]
+
+
+                assert len(group["params"]) == 1
+                param = group["params"][0]
+
+
+                stored_state = opt.state.get(param, None)
+
+
+                # --------------------------------------------------
+                # ✅ CASE 1: có state (Adam)
+                # --------------------------------------------------
+                if stored_state is not None:
+
+
+                    stored_state["exp_avg"] = torch.cat(
+                        (stored_state["exp_avg"], torch.zeros_like(extension_tensor)),
+                        dim=0
+                    )
+
+
+                    stored_state["exp_avg_sq"] = torch.cat(
+                        (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
+                        dim=0
+                    )
+
+
+                    del opt.state[param]
+
+
+                    new_param = nn.Parameter(
+                        torch.cat((param, extension_tensor), dim=0).requires_grad_(True)
+                    )
+
+
+                    group["params"][0] = new_param
+                    opt.state[new_param] = stored_state
+
+
+                    optimizable_tensors[name] = new_param
+
+
+                # --------------------------------------------------
+                # ✅ CASE 2: không có state
+                # --------------------------------------------------
+                else:
+                    new_param = nn.Parameter(
+                        torch.cat((param, extension_tensor), dim=0).requires_grad_(True)
+                    )
+
+
+                    group["params"][0] = new_param
+                    optimizable_tensors[name] = new_param
+
+
+        return optimizable_tensors
+
     def densification_postfix(
         self,
         new_xyz,
