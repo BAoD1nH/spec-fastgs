@@ -79,8 +79,7 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         get_flag = True
         l1_loss_norm = get_loss(render_image, gt_image)
         
-        # metric_map = (l1_loss_norm > args.loss_thresh).int()
-        metric_map = (l1_loss_norm > args.loss_thresh).to(torch.int32)
+        metric_map = (l1_loss_norm > args.loss_thresh).int()
 
         render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
 
