@@ -1,26 +1,26 @@
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
+# ============================================================
+# Rendering Script (Spec-Gaussian + FastGS)
+# ============================================================
 
 import torch
-from scene import Scene
 import os
+import time
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render_fastgs
 import torchvision
+
+from scene import Scene, GaussianModel, SpecularModel
+from gaussian_renderer import render_fastgs
+
 from utils.general_utils import safe_state
+
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
-import time
 
+
+# ------------------------------------------------------------
+# RENDER ONE SET (TRAIN / TEST)
+# ------------------------------------------------------------
 
 def render_set(
     model_path,
@@ -30,18 +30,46 @@ def render_set(
     gaussians,
     pipeline,
     background,
-    args,
-    specular_model=None   # <<< THÊM
+    specular_mlp,
+    args
 ):
+
     render_path = os.path.join(model_path, name, f"ours_{iteration}", "renders")
     gts_path = os.path.join(model_path, name, f"ours_{iteration}", "gt")
-
-    total_time = 0.0
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+    total_time = 0.0
+
+    for idx, view in enumerate(tqdm(views, desc=f"{name} rendering")):
+
+        # --------------------------------------------------------
+        # COMPUTE VIEWDIR + NORMAL
+        # --------------------------------------------------------
+
+        xyz = gaussians.get_xyz
+        cam_center = view.camera_center
+
+        viewdir = xyz - cam_center
+        viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+
+        normal = gaussians.get_normal_axis(viewdir)
+
+        # --------------------------------------------------------
+        # SPECULAR
+        # --------------------------------------------------------
+
+        mlp_color = specular_mlp.step(
+            gaussians.get_asg_features,
+            viewdir,
+            normal
+        )
+
+        # --------------------------------------------------------
+        # RENDER
+        # --------------------------------------------------------
+
         start_time = time.time()
 
         render_pkg = render_fastgs(
@@ -50,21 +78,20 @@ def render_set(
             pipeline,
             background,
             args.mult,
-            specular_model=specular_model,
-            get_flag=True
+            mlp_color=mlp_color
         )
-
-        rendering = render_pkg["render"]
 
         end_time = time.time()
         total_time += (end_time - start_time)
 
+        rendering = render_pkg["render"]
         gt = view.original_image[0:3, :, :]
 
         torchvision.utils.save_image(
             rendering,
             os.path.join(render_path, f"{idx:05d}.png")
         )
+
         torchvision.utils.save_image(
             gt,
             os.path.join(gts_path, f"{idx:05d}.png")
@@ -74,11 +101,12 @@ def render_set(
     avg_time = total_time / num_frames if num_frames > 0 else 0.0
     fps = 1.0 / avg_time if avg_time > 0 else 0.0
 
-    print(
-        f"[{name}] Rendered {num_frames} frames in {total_time:.2f}s. "
-        f"Average FPS: {fps:.2f}"
-    )
+    print(f"[{name}] {num_frames} frames | FPS: {fps:.2f}")
 
+
+# ------------------------------------------------------------
+# MAIN RENDER FUNCTION
+# ------------------------------------------------------------
 
 def render_sets(
     dataset: ModelParams,
@@ -88,36 +116,30 @@ def render_sets(
     skip_test: bool,
     args
 ):
+
     with torch.no_grad():
-        # === Load Gaussian Model (FastGS) ===
-        gaussians = GaussianModel(dataset.sh_degree, optimizer_type="default")
+
+        # --------------------------------------------------------
+        # LOAD MODELS
+        # --------------------------------------------------------
+
+        gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
-        # === Background ===
+        specular_mlp = SpecularModel(dataset.is_real, dataset.is_indoor)
+        specular_mlp.load_weights(dataset.model_path)
+
+        # --------------------------------------------------------
+        # BACKGROUND
+        # --------------------------------------------------------
+
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        # === OPTIONAL: Load specular model ===
-        specular_model = None
-        if args.use_specular:
-            from specular import SpecularModel
+        # --------------------------------------------------------
+        # RENDER TRAIN / TEST
+        # --------------------------------------------------------
 
-            specular_model = SpecularModel().cuda()
-            specular_ckpt = os.path.join(
-                dataset.model_path, "specular", "specular.pth"
-            )
-
-            if not os.path.exists(specular_ckpt):
-                raise FileNotFoundError(
-                    f"[Spec-FastGS] Specular checkpoint not found: {specular_ckpt}"
-                )
-
-            specular_model.load_state_dict(torch.load(specular_ckpt))
-            specular_model.eval()
-
-            print("[Spec-FastGS] Specular model loaded.")
-
-        # === Render train / test sets ===
         if not skip_train:
             render_set(
                 dataset.model_path,
@@ -127,8 +149,8 @@ def render_sets(
                 gaussians,
                 pipeline,
                 background,
-                args,
-                specular_model
+                specular_mlp,
+                args
             )
 
         if not skip_test:
@@ -140,14 +162,18 @@ def render_sets(
                 gaussians,
                 pipeline,
                 background,
-                args,
-                specular_model
+                specular_mlp,
+                args
             )
 
 
+# ------------------------------------------------------------
+# ENTRY POINT
+# ------------------------------------------------------------
+
 if __name__ == "__main__":
 
-    parser = ArgumentParser(description="Rendering script (FastGS / Spec-FastGS)")
+    parser = ArgumentParser(description="Rendering Spec-FastGS")
 
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
@@ -158,25 +184,10 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mult", type=float, default=0.5)
 
-    # <<< THÊM FLAG SPECULAR >>>
-    parser.add_argument(
-        "--use_specular",
-        action="store_true",
-        help="Enable Specular-FastGS rendering"
-    )
-
-
-    parser.add_argument(
-        "--debug_specular_mask",
-        action="store_true",
-        help="Visualize specular Gaussians"
-    )
-
     args = get_combined_args(parser)
 
     print("Rendering " + args.model_path)
 
-    # Initialize system state (RNG)
     safe_state(args.quiet)
 
     render_sets(
@@ -187,3 +198,4 @@ if __name__ == "__main__":
         args.skip_test,
         args
     )
+
