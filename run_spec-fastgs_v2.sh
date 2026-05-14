@@ -22,7 +22,6 @@ python train.py \
     -i images_4 \
     --eval \
     --iterations 30000 \
-    --test_iterations 30000 \
     --densification_interval 500 \
     --optimizer_type default \
     --asg_degree 24 \

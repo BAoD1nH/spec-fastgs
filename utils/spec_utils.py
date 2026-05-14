@@ -166,7 +166,7 @@ class SpecularNetworkReal(nn.Module):
     def __init__(self, is_indoor=False):
         super().__init__()
 
-        self.asg_feature = 12
+        self.asg_feature = 24
         self.num_theta = 2
         self.num_phi = 4
 

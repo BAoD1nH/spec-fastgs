@@ -46,6 +46,10 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
+        self.asg_degree = 24
+        self.is_real = False
+        self.is_indoor = False
+
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -101,6 +105,9 @@ class OptimizationParams(ParamGroup):
 
         self.random_background = False
         self.optimizer_type = "default"
+
+        self.specular_lr_max_steps = 30000
+        
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
