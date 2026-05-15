@@ -199,10 +199,12 @@ def training(dataset, opt, pipe):
         # SAVE
         # --------------------------------------------------------
 
-        if iteration % 5000 == 0:
+        if iteration in [17000, opt.iterations]:
             print(f"[ITER {iteration}] Saving...")
             scene.save(iteration)
 
+            # ✅ QUAN TRỌNG NHẤT
+            specular_mlp.save_weights(scene.model_path, iteration)
 
 # ============================================================
 # UTILS

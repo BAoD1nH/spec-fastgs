@@ -21,7 +21,7 @@ python train.py \
     -m ${OUTPUT_ROOT}/${SCENE} \
     -i images_4 \
     --eval \
-    --iterations 30000 \
+    --iterations 4000 \
     --densification_interval 500 \
     --optimizer_type default \
     --asg_degree 24 \
@@ -35,6 +35,7 @@ python train.py \
 
 python render.py \
     -m ${OUTPUT_ROOT}/${SCENE} \
+    --iteration 4000 \
     --skip_train
 
 

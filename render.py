@@ -49,19 +49,19 @@ def render_set(
         # --------------------------------------------------------
 
         xyz = gaussians.get_xyz
-        cam_center = view.camera_center
+        cam_center = view.camera_center.to("cuda")  
 
         viewdir = xyz - cam_center
         viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
 
-        normal = gaussians.get_normal_axis(viewdir)
+        normal = gaussians.get_normal_axis(viewdir).to("cuda")
 
         # --------------------------------------------------------
         # SPECULAR
         # --------------------------------------------------------
 
         mlp_color = specular_mlp.step(
-            gaussians.get_asg_features,
+            gaussians.get_asg_features.to("cuda"),
             viewdir,
             normal
         )
@@ -126,8 +126,20 @@ def render_sets(
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
+        # ✅ LOAD ASG FEATURE
+        asg_path = os.path.join(
+            dataset.model_path,
+            f"point_cloud/iteration_{scene.loaded_iter}/asg.pt"
+        )
+
+        print("Loading ASG from:", asg_path)
+
+        gaussians._features_asg = torch.load(asg_path).cuda()
+
+        print("ASG loaded with shape:", gaussians._features_asg.shape)
+        
         specular_mlp = SpecularModel(dataset.is_real, dataset.is_indoor)
-        specular_mlp.load_weights(dataset.model_path)
+        specular_mlp.load_weights(dataset.model_path, iteration=scene.loaded_iter)
 
         # --------------------------------------------------------
         # BACKGROUND

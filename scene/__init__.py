@@ -5,6 +5,7 @@
 import os
 import random
 import json
+import torch
 
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
@@ -163,6 +164,10 @@ class Scene:
             os.path.join(path, "point_cloud.ply")
         )
 
+        torch.save(
+            self.gaussians.get_asg_features.detach().cpu(),
+            os.path.join(path, "asg.pt")
+        )
     # ------------------------------------------------------------
     # GET CAMERAS
     # ------------------------------------------------------------
