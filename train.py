@@ -160,16 +160,51 @@ def training(dataset, opt, pipe):
         residual = gt - sh_image
         spec_image = image - sh_image
 
+        # --- OLD ---
         # Mask residual to focus on meaningful pixels (optional)
-        residual_threshold = 0.03  # tunable: pixels with mean-channel residual > thresh are used
+        # residual_threshold = 0.03  # tunable: pixels with mean-channel residual > thresh are used
+        # residual_mag = residual.abs().mean(dim=0)  # (H, W)
+        # mask = residual_mag > residual_threshold
+        # 
+        # if mask.sum() > 0:
+        #     mask3 = mask.unsqueeze(0).repeat(3, 1, 1)
+        #     spec_loss = l1_loss(spec_image * mask3, residual * mask3)
+        # else:
+        #     spec_loss = l1_loss(spec_image, residual)
+        # --- END OLD ---
+
+        # --- NEW: adaptive top-percentile masking + weighted L1 to emphasize highlights ---
+        # Compute per-pixel residual magnitude (mean over channels)
         residual_mag = residual.abs().mean(dim=0)  # (H, W)
-        mask = residual_mag > residual_threshold
+
+        # Adaptive threshold: top 10% brightest residual pixels
+        try:
+            thresh = torch.quantile(residual_mag.flatten(), 0.9)
+        except Exception:
+            # fallback if quantile not supported or empty
+            thresh = residual_mag.mean() + 1e-6
+
+        mask = residual_mag >= thresh
+
+        # Weight map proportional to residual magnitude (normalized by max)
+        max_mag = residual_mag.max()
+        if (max_mag - 0.0).abs() > 1e-8:
+            weight_map = residual_mag / (max_mag + 1e-8)
+        else:
+            weight_map = residual_mag.clone()
+
+        mask3 = mask.unsqueeze(0).repeat(3, 1, 1)
+        weight3 = weight_map.unsqueeze(0).repeat(3, 1, 1)
+
+        # Absolute difference between predicted spec and residual target
+        abs_diff = (spec_image - residual).abs()
 
         if mask.sum() > 0:
-            mask3 = mask.unsqueeze(0).repeat(3, 1, 1)
-            spec_loss = l1_loss(spec_image * mask3, residual * mask3)
+            # Weighted L1 focused on top-percentile pixels
+            spec_loss = (weight3 * abs_diff * mask3).sum() / (mask3.sum() + 1e-8)
         else:
-            spec_loss = l1_loss(spec_image, residual)
+            # Fallback: weighted mean over all pixels
+            spec_loss = (weight3 * abs_diff).mean()
 
         # Combine losses
         spec_weight = 1.0  # tunable weight for specular supervision
@@ -178,14 +213,43 @@ def training(dataset, opt, pipe):
         loss.backward()
 
         # --------------------------------------------------------
+        # Reduce SH competition: scale down SH gradients for a window after specular activation
+        # This prevents SH from absorbing highlight residuals while specular learns.
+        # Minimal parameters (tunable): spec_start, spec_freeze_steps, sh_grad_scale
+        # --------------------------------------------------------
+        spec_start = 3000  # must match when specular is enabled
+        spec_freeze_steps = 2000  # number of iterations to reduce SH learning
+        sh_grad_scale = 0.01  # scale applied to SH gradients (0 disables updates)
+
+        if iteration > spec_start and iteration <= spec_start + spec_freeze_steps:
+            try:
+                if hasattr(gaussians, "_features_rest") and gaussians._features_rest.grad is not None:
+                    gaussians._features_rest.grad.mul_(sh_grad_scale)
+                if hasattr(gaussians, "_features_dc") and gaussians._features_dc.grad is not None:
+                    gaussians._features_dc.grad.mul_(sh_grad_scale)
+            except Exception:
+                pass
+
+        # --------------------------------------------------------
         # OPTIMIZER STEP
         # --------------------------------------------------------
 
         gaussians.optimizer.step()
         gaussians.optimizer.zero_grad(set_to_none=True)
 
-        specular_mlp.optimizer_step()
+        # SH optimizer: skip updates during specular-focused window to avoid SH stealing highlights
+        # Use same window parameters as gradient-scaling above
+        try:
+            if not (iteration > spec_start and iteration <= spec_start + spec_freeze_steps):
+                if hasattr(gaussians, 'shoptimizer') and gaussians.shoptimizer is not None:
+                    gaussians.shoptimizer.step()
+                    gaussians.shoptimizer.zero_grad(set_to_none=True)
+        except Exception:
+            pass
+
+        # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
         specular_mlp.update_learning_rate(iteration)
+        specular_mlp.optimizer_step()
 
         # --------------------------------------------------------
         # LOG

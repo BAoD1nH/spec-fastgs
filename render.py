@@ -36,9 +36,11 @@ def render_set(
 
     render_path = os.path.join(model_path, name, f"ours_{iteration}", "renders")
     gts_path = os.path.join(model_path, name, f"ours_{iteration}", "gt")
+    spec_path = os.path.join(model_path, name, f"ours_{iteration}", "spec")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+    makedirs(spec_path, exist_ok=True)
 
     total_time = 0.0
 
@@ -108,7 +110,7 @@ def render_set(
         spec_scaled = (spec_image * amp_factor).clamp(0.0, 1.0)
         torchvision.utils.save_image(
             spec_scaled,
-            os.path.join(render_path, f"{idx:05d}_spec_scaled.png")
+            os.path.join(spec_path, f"{idx:05d}_spec_scaled.png")
         )
 
         # 2) Normalized specular (min-max to [0,1])
@@ -121,7 +123,7 @@ def render_set(
         spec_norm = spec_norm.clamp(0.0, 1.0)
         torchvision.utils.save_image(
             spec_norm,
-            os.path.join(render_path, f"{idx:05d}_spec_norm.png")
+            os.path.join(spec_path, f"{idx:05d}_spec_norm.png")
         )
 
         # 3) Residual (absolute GT - SH) and scaled for visualization
@@ -130,7 +132,7 @@ def render_set(
         residual_vis = (residual * residual_scale).clamp(0.0, 1.0)
         torchvision.utils.save_image(
             residual_vis,
-            os.path.join(render_path, f"{idx:05d}_residual.png")
+            os.path.join(spec_path, f"{idx:05d}_residual.png")
         )
 
         # --------------------------------------------------------
@@ -146,6 +148,51 @@ def render_set(
             gt,
             os.path.join(gts_path, f"{idx:05d}.png")
         )
+
+        # --------------------------------------------------------
+        # SPECULAR SHARP PASS (minimal change)
+        # Render specular only with reduced spatial smoothing by using
+        # a smaller scaling_modifier for the specular pass. Do not
+        # change the diffuse SH rendering above.
+        # --------------------------------------------------------
+
+        # Only run this pass if we actually have a specular contribution
+        if mlp_color is not None:
+            # smaller scaling modifier for sharper splats (tune 0.3-0.5)
+            spec_scaling_modifier = 0.35
+
+            # override_color set to zero so renderer composes only mlp_color
+            zeros_override = torch.zeros((gaussians.get_xyz.shape[0], 3), dtype=gaussians.get_xyz.dtype, device="cuda")
+
+            spec_sharp_pkg = render_fastgs(
+                view,
+                gaussians,
+                pipeline,
+                background,
+                args.mult,
+                mlp_color=mlp_color,
+                scaling_modifier=spec_scaling_modifier,
+                override_color=zeros_override
+            )
+
+            spec_sharp = spec_sharp_pkg["render"]
+
+            # Save specular-only sharp render and a composite with the original SH
+            torchvision.utils.save_image(
+                spec_sharp.clamp(0.0, 1.0),
+                os.path.join(spec_path, f"{idx:05d}_spec_sharp.png")
+            )
+
+            # Composite: original SH (from sh_image) + sharp specular
+            composite_sharp = (sh_image + spec_sharp).clamp(0.0, 1.0)
+            torchvision.utils.save_image(
+                composite_sharp,
+                os.path.join(spec_path, f"{idx:05d}_sharp_composite.png")
+            )
+
+        # --------------------------------------------------------
+        # end frame loop
+        # --------------------------------------------------------
 
     num_frames = len(views)
     avg_time = total_time / num_frames if num_frames > 0 else 0.0

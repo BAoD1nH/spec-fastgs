@@ -16,17 +16,17 @@ OUTPUT_ROOT=./output_spec_fastgs
 
 SCENE=counter
 
-# python train.py \
-#     -s ${DATA_ROOT}/${SCENE} \
-#     -m ${OUTPUT_ROOT}/${SCENE} \
-#     -i images_4 \
-#     --eval \
-#     --iterations 30000 \
-#     --densification_interval 500 \
-#     --optimizer_type default \
-#     --asg_degree 24 \
-#     --is_real \
-#     --is_indoor
+python train.py \
+    -s ${DATA_ROOT}/${SCENE} \
+    -m ${OUTPUT_ROOT}/${SCENE} \
+    -i images_4 \
+    --eval \
+    --iterations 30000 \
+    --densification_interval 500 \
+    --optimizer_type default \
+    --asg_degree 24 \
+    --is_real \
+    --is_indoor
 
 
 # ============================================================
@@ -43,6 +43,6 @@ python render.py \
 # METRICS
 # ============================================================
 
-# python metrics.py \
-#     -m ${OUTPUT_ROOT}/${SCENE}
+python metrics.py \
+    -m ${OUTPUT_ROOT}/${SCENE}
 
