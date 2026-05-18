@@ -67,9 +67,22 @@ def render_set(
         )
 
         # --------------------------------------------------------
-        # RENDER
+        # DEBUG VISUALIZATIONS (SH-only, specular diagnostics)
         # --------------------------------------------------------
+        # Minimal extra renders: compute SH-only image and full image
 
+        # SH-only render (no specular)
+        sh_pkg = render_fastgs(
+            view,
+            gaussians,
+            pipeline,
+            background,
+            args.mult,
+            mlp_color=None
+        )
+        sh_image = sh_pkg["render"]
+
+        # Full render (SH + specular)
         start_time = time.time()
 
         render_pkg = render_fastgs(
@@ -86,6 +99,43 @@ def render_set(
 
         rendering = render_pkg["render"]
         gt = view.original_image[0:3, :, :]
+
+        # Specular image = full - SH
+        spec_image = rendering - sh_image
+
+        # 1) Amplified specular (for visibility)
+        amp_factor = 10.0
+        spec_scaled = (spec_image * amp_factor).clamp(0.0, 1.0)
+        torchvision.utils.save_image(
+            spec_scaled,
+            os.path.join(render_path, f"{idx:05d}_spec_scaled.png")
+        )
+
+        # 2) Normalized specular (min-max to [0,1])
+        minv = spec_image.min()
+        maxv = spec_image.max()
+        if (maxv - minv).abs() > 1e-8:
+            spec_norm = (spec_image - minv) / (maxv - minv)
+        else:
+            spec_norm = spec_image.clone()
+        spec_norm = spec_norm.clamp(0.0, 1.0)
+        torchvision.utils.save_image(
+            spec_norm,
+            os.path.join(render_path, f"{idx:05d}_spec_norm.png")
+        )
+
+        # 3) Residual (absolute GT - SH) and scaled for visualization
+        residual = (gt - sh_image).abs()
+        residual_scale = 5.0
+        residual_vis = (residual * residual_scale).clamp(0.0, 1.0)
+        torchvision.utils.save_image(
+            residual_vis,
+            os.path.join(render_path, f"{idx:05d}_residual.png")
+        )
+
+        # --------------------------------------------------------
+        # SAVE RENDERS (original behavior)
+        # --------------------------------------------------------
 
         torchvision.utils.save_image(
             rendering,
