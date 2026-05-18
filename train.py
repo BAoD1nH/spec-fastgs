@@ -107,12 +107,28 @@ def training(dataset, opt, pipe):
                 normal
             )
         else:
-            mlp_color = 0
+            mlp_color = None
 
         # --------------------------------------------------------
         # RENDER
         # --------------------------------------------------------
 
+        # Minimal intervention: compute SH-only render to get the residual
+        # and supervise the specular contribution in image space.
+        # Note: this does an extra (SH-only) render per step for testing.
+
+        # SH-only render (no specular)
+        sh_pkg = render_fastgs(
+            cam,
+            gaussians,
+            pipe,
+            background,
+            opt.mult,
+            mlp_color=None
+        )
+        sh_image = sh_pkg["render"]
+
+        # Full render (SH + spec if mlp_color is not None)
         render_pkg = render_fastgs(
             cam,
             gaussians,
@@ -128,15 +144,36 @@ def training(dataset, opt, pipe):
         radii = render_pkg["radii"]
 
         # --------------------------------------------------------
-        # LOSS (NO SPEC LOSS)
+        # LOSS (NO SPEC LOSS) -> now augmented with spec_loss
         # --------------------------------------------------------
 
         gt = cam.original_image.cuda()
 
+        # Photometric loss (original)
         Ll1 = l1_loss(image, gt)
         ssim_val = fast_ssim(image.unsqueeze(0), gt.unsqueeze(0))
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+        photometric_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
+
+        # Image-space spec supervision (residual)
+        # residual := ground-truth - SH_only
+        residual = gt - sh_image
+        spec_image = image - sh_image
+
+        # Mask residual to focus on meaningful pixels (optional)
+        residual_threshold = 0.03  # tunable: pixels with mean-channel residual > thresh are used
+        residual_mag = residual.abs().mean(dim=0)  # (H, W)
+        mask = residual_mag > residual_threshold
+
+        if mask.sum() > 0:
+            mask3 = mask.unsqueeze(0).repeat(3, 1, 1)
+            spec_loss = l1_loss(spec_image * mask3, residual * mask3)
+        else:
+            spec_loss = l1_loss(spec_image, residual)
+
+        # Combine losses
+        spec_weight = 1.0  # tunable weight for specular supervision
+        loss = photometric_loss + spec_weight * spec_loss
 
         loss.backward()
 
