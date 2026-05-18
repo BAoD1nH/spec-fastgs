@@ -144,6 +144,29 @@ def training(dataset, opt, pipe):
         radii = render_pkg["radii"]
 
         # --------------------------------------------------------
+        # SPECULAR SHARP PASS FOR TRAINING (use for spec supervision)
+        # --------------------------------------------------------
+        if mlp_color is not None:
+            try:
+                zeros_override = torch.zeros((gaussians.get_xyz.shape[0], 3), dtype=gaussians.get_xyz.dtype, device="cuda")
+                spec_sharp_pkg = render_fastgs(
+                    cam,
+                    gaussians,
+                    pipe,
+                    background,
+                    opt.mult,
+                    mlp_color=mlp_color,
+                    scaling_modifier=0.35,
+                    override_color=zeros_override
+                )
+                spec_image = spec_sharp_pkg["render"]
+            except Exception:
+                # fallback to smoothed prediction
+                spec_image = image - sh_image
+        else:
+            spec_image = image - sh_image
+
+        # --------------------------------------------------------
         # LOSS (NO SPEC LOSS) -> now augmented with spec_loss
         # --------------------------------------------------------
 
@@ -158,7 +181,6 @@ def training(dataset, opt, pipe):
         # Image-space spec supervision (residual)
         # residual := ground-truth - SH_only
         residual = gt - sh_image
-        spec_image = image - sh_image
 
         # --- OLD ---
         # Mask residual to focus on meaningful pixels (optional)
@@ -173,41 +195,40 @@ def training(dataset, opt, pipe):
         #     spec_loss = l1_loss(spec_image, residual)
         # --- END OLD ---
 
-        # --- NEW: adaptive top-percentile masking + weighted L1 to emphasize highlights ---
+        # --- NEW: top-5% masking + weighted L2 (MSE) to emphasize sharp highlights ---
         # Compute per-pixel residual magnitude (mean over channels)
         residual_mag = residual.abs().mean(dim=0)  # (H, W)
 
-        # Adaptive threshold: top 10% brightest residual pixels
+        # Tighter adaptive threshold: top 5% brightest residual pixels
         try:
-            thresh = torch.quantile(residual_mag.flatten(), 0.9)
+            thresh = torch.quantile(residual_mag.flatten(), 0.95)
         except Exception:
-            # fallback if quantile not supported or empty
             thresh = residual_mag.mean() + 1e-6
 
         mask = residual_mag >= thresh
-
-        # Weight map proportional to residual magnitude (normalized by max)
-        max_mag = residual_mag.max()
-        if (max_mag - 0.0).abs() > 1e-8:
-            weight_map = residual_mag / (max_mag + 1e-8)
-        else:
-            weight_map = residual_mag.clone()
-
         mask3 = mask.unsqueeze(0).repeat(3, 1, 1)
-        weight3 = weight_map.unsqueeze(0).repeat(3, 1, 1)
 
-        # Absolute difference between predicted spec and residual target
-        abs_diff = (spec_image - residual).abs()
+        # Weight map proportional to residual magnitude (normalized)
+        max_mag = residual_mag.max()
+        if (max_mag).abs() > 1e-8:
+            weight = residual_mag / (max_mag + 1e-8)
+        else:
+            weight = residual_mag.clone()
+        mask_weight = weight.unsqueeze(0).repeat(3, 1, 1)
+
+        # Squared error (L2) between predicted spec and residual
+        sq_diff = (spec_image - residual) ** 2
 
         if mask.sum() > 0:
-            # Weighted L1 focused on top-percentile pixels
-            spec_loss = (weight3 * abs_diff * mask3).sum() / (mask3.sum() + 1e-8)
+            # Weighted L2 averaged over masked pixels (emphasize strong highlights)
+            weighted_masked = sq_diff * mask_weight * mask3
+            spec_loss = weighted_masked.sum() / (mask3.sum() + 1e-8)
         else:
             # Fallback: weighted mean over all pixels
-            spec_loss = (weight3 * abs_diff).mean()
+            spec_loss = (sq_diff * mask_weight).mean()
 
-        # Combine losses
-        spec_weight = 1.0  # tunable weight for specular supervision
+        # Combine losses with stronger specular influence
+        spec_weight = 2.0
         loss = photometric_loss + spec_weight * spec_loss
 
         loss.backward()
@@ -238,10 +259,9 @@ def training(dataset, opt, pipe):
         gaussians.optimizer.zero_grad(set_to_none=True)
 
         # SH optimizer: skip updates during specular-focused window to avoid SH stealing highlights
-        # Use same window parameters as gradient-scaling above
         try:
-            if not (iteration > spec_start and iteration <= spec_start + spec_freeze_steps):
-                if hasattr(gaussians, 'shoptimizer') and gaussians.shoptimizer is not None:
+            if hasattr(gaussians, 'shoptimizer') and gaussians.shoptimizer is not None:
+                if not (iteration > spec_start and iteration <= spec_start + spec_freeze_steps):
                     gaussians.shoptimizer.step()
                     gaussians.shoptimizer.zero_grad(set_to_none=True)
         except Exception:
