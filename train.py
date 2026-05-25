@@ -215,17 +215,8 @@ def training(dataset, opt, pipe):
         # OPTIMIZER STEP
         # --------------------------------------------------------
 
-        gaussians.optimizer.step()
-        gaussians.optimizer.zero_grad(set_to_none=True)
-
-        # SH optimizer: skip updates during specular-focused window to avoid SH stealing highlights
-        try:
-            if hasattr(gaussians, 'shoptimizer') and gaussians.shoptimizer is not None:
-                if not (iteration > spec_start and iteration <= spec_start + spec_freeze_steps):
-                    gaussians.shoptimizer.step()
-                    gaussians.shoptimizer.zero_grad(set_to_none=True)
-        except Exception:
-            pass
+        skip_sh = (iteration > spec_start and iteration <= spec_start + spec_freeze_steps)
+        gaussians.optimizer_step(iteration, skip_sh=skip_sh)
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
         specular_mlp.update_learning_rate(iteration)
@@ -262,9 +253,10 @@ def training(dataset, opt, pipe):
             ):
                 camlist = sampling_cameras(scene.getTrainCameras().copy())
 
-                importance_score, pruning_score = compute_gaussian_score_fastgs(
-                    camlist, gaussians, pipe, background, opt, DENSIFY=True
-                )
+                with torch.no_grad():
+                    importance_score, pruning_score = compute_gaussian_score_fastgs(
+                        camlist, gaussians, pipe, background, opt, DENSIFY=True
+                    )
 
                 gaussians.densify_and_prune_fastgs(
                     max_screen_size=None,

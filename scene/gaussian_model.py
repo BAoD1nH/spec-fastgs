@@ -75,12 +75,16 @@ class GaussianModel:
         self.setup_functions()
 
     def capture(self, optimizer_type):
-        if optimizer_type == "default":
-            return (
+        # Ensure ASG features and optimizer states are always included for robust checkpointing
+        opt_state = self.optimizer.state_dict() if self.optimizer is not None else None
+        shopt_state = self.shoptimizer.state_dict() if getattr(self, 'shoptimizer', None) is not None else None
+
+        return (
             self.active_sh_degree,
             self._xyz,
             self._features_dc,
             self._features_rest,
+            self._features_asg,
             self._scaling,
             self._rotation,
             self._opacity,
@@ -88,48 +92,46 @@ class GaussianModel:
             self.xyz_gradient_accum,
             self.xyz_gradient_accum_abs,
             self.denom,
-            self.optimizer.state_dict(),
-            self.shoptimizer.state_dict(),
+            opt_state,
+            shopt_state,
             self.spatial_lr_scale,
         )
-        else:
-            return (
-            self.active_sh_degree,
-            self._xyz,
-            self._features_dc,
-            self._features_rest,
-            self._scaling,
-            self._rotation,
-            self._opacity,
-            self.max_radii2D,
-            self.xyz_gradient_accum,
-            self.xyz_gradient_accum_abs,
-            self.denom,
-            self.optimizer.state_dict(),
-            self.spatial_lr_scale,
-        )
-    
+
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum,
-        xyz_gradient_accum_abs, 
-        denom,
-        opt_dict, 
-        shopt_dict,
-        self.spatial_lr_scale) = model_args
+        (self.active_sh_degree,
+         self._xyz,
+         self._features_dc,
+         self._features_rest,
+         self._features_asg,
+         self._scaling,
+         self._rotation,
+         self._opacity,
+         self.max_radii2D,
+         xyz_gradient_accum,
+         xyz_gradient_accum_abs,
+         denom,
+         opt_dict,
+         shopt_dict,
+         self.spatial_lr_scale) = model_args
+
+        # Recreate optimizers / param groups with training_args then load states if present
         self.training_setup(training_args)
+
         self.xyz_gradient_accum = xyz_gradient_accum
         self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
-        self.shoptimizer.load_state_dict(shopt_dict)
+
+        try:
+            if opt_dict is not None and self.optimizer is not None:
+                self.optimizer.load_state_dict(opt_dict)
+        except Exception:
+            pass
+
+        try:
+            if shopt_dict is not None and getattr(self, 'shoptimizer', None) is not None:
+                self.shoptimizer.load_state_dict(shopt_dict)
+        except Exception:
+            pass
 
     @property
     def get_scaling(self):
@@ -225,7 +227,7 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
-        sh_l = [{'params': [self._features_rest], 'lr': training_args.highfeature_lr / 20.0, "name": "f_rest"}]
+        sh_l = [{'params': [self._features_rest], 'lr': training_args.highfeature_lr, "name": "f_rest"}]
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -245,26 +247,28 @@ class GaussianModel:
                 param_group['lr'] = lr
                 return lr
 
-    def optimizer_step(self, iteration):
+    def optimizer_step(self, iteration, skip_sh=False):
         ''' An optimization schdeuler. The goal is similar to the sparse Adam of taming 3dgs.'''
         if iteration <= 15000:
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none = True)
-            if iteration % 16 == 0:
+            if not skip_sh and iteration % 16 == 0:
                 self.shoptimizer.step()
                 self.shoptimizer.zero_grad(set_to_none = True)
         elif iteration <= 20000:
-            if iteration % 32 ==0:
+            if iteration % 32 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
-                self.shoptimizer.step()
-                self.shoptimizer.zero_grad(set_to_none = True)
+                if not skip_sh:
+                    self.shoptimizer.step()
+                    self.shoptimizer.zero_grad(set_to_none = True)
         else:
-            if iteration % 64 ==0:
+            if iteration % 64 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
-                self.shoptimizer.step()
-                self.shoptimizer.zero_grad(set_to_none = True)
+                if not skip_sh:
+                    self.shoptimizer.step()
+                    self.shoptimizer.zero_grad(set_to_none = True)
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']

@@ -19,7 +19,7 @@ SCENE=counter
 python train.py \
     -s ${DATA_ROOT}/${SCENE} \
     -m ${OUTPUT_ROOT}/${SCENE} \
-    -i images_4 \
+    -i images_2 \
     --eval \
     --iterations 30000 \
     --densification_interval 500 \
