@@ -185,7 +185,7 @@ def training(dataset, opt, pipe):
 
         # Gaussian-space specular regulariser (no extra render needed)
         if spec_sparse is not None:
-            spec_reg = spec_sparse.pow(2).mean() * 0.01
+            spec_reg = spec_sparse.pow(2).mean() * 0.0
         else:
             spec_reg = 0.0
 
