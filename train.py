@@ -4,7 +4,7 @@
 
 import torch
 import numpy as np
-import os, time, sys
+import os, time, sys, json
 from random import randint
 from tqdm import tqdm
 import uuid
@@ -35,6 +35,7 @@ except:
 
 def training(dataset, opt, pipe):
 
+    start_time = time.time()
     tb_writer = prepare_output_and_logger(dataset)
 
     # ------------------------------------------------------------
@@ -43,6 +44,7 @@ def training(dataset, opt, pipe):
 
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
+    initial_gaussians = gaussians.get_xyz.shape[0]
     gaussians.training_setup(opt)
 
     specular_mlp = SpecularModel(dataset.is_real, dataset.is_indoor)
@@ -278,6 +280,32 @@ def training(dataset, opt, pipe):
 
             # ✅ QUAN TRỌNG NHẤT
             specular_mlp.save_weights(scene.model_path, iteration)
+
+    # ------------------------------------------------------------
+    # SAVE METADATA
+    # ------------------------------------------------------------
+    end_time = time.time()
+    duration = end_time - start_time
+    minutes = int(duration // 60)
+    seconds = int(duration % 60)
+
+    metadata = {
+        "scene": dataset.source_path.split("/")[-1],
+        "image_scale": dataset.images,
+        "iterations": opt.iterations,
+        "initial_gaussians": initial_gaussians,
+        "final_gaussians": gaussians.get_xyz.shape[0],
+        "training_time_seconds": round(duration, 2),
+        "training_time_formatted": f"{minutes}m {seconds}s",
+        "peak_vram_mib": round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2),
+        "datetime_completed": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    info_path = os.path.join(dataset.model_path, "train_info.json")
+    with open(info_path, "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    print(f"Training metadata saved to {info_path}")
 
 # ============================================================
 # UTILS
