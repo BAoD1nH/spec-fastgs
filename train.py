@@ -344,10 +344,15 @@ def prepare_output_and_logger(args):
             # Use last modified time of the directory for the backup timestamp
             mtime = os.path.getmtime(args.model_path)
             timestamp = datetime.datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
+
+            parent_dir = os.path.dirname(args.model_path)
+            folder_name = os.path.basename(args.model_path.rstrip('/'))
+            backup_dir = os.path.join(parent_dir, "backups", folder_name)
+            backup_path = os.path.join(backup_dir, f"{existing_branch}_{timestamp}")
             
-            backup_path = f"{args.model_path.rstrip('/')}_backup_{existing_branch}_{timestamp}"
             print(f"Output folder already exists and is not empty. Moving old run to: {backup_path}")
             try:
+                os.makedirs(backup_dir, exist_ok=True)
                 os.rename(args.model_path, backup_path)
             except Exception as e:
                 print(f"Warning: Could not rename existing output folder: {e}")
