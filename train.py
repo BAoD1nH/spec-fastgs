@@ -291,6 +291,7 @@ def training(dataset, opt, pipe):
 
     metadata = {
         "scene": dataset.source_path.split("/")[-1],
+        "git_branch": get_git_branch(),
         "image_scale": dataset.images,
         "iterations": opt.iterations,
         "initial_gaussians": initial_gaussians,
@@ -311,11 +312,45 @@ def training(dataset, opt, pipe):
 # UTILS
 # ============================================================
 
+def get_git_branch():
+    try:
+        import subprocess
+        return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode("utf-8").strip()
+    except Exception:
+        return "unknown"
+
 def prepare_output_and_logger(args):
 
     if not args.model_path:
         unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str)
+    else:
+        # If the output directory already exists and contains files, back it up first
+        if os.path.exists(args.model_path) and os.listdir(args.model_path):
+            import datetime
+            existing_branch = "unknown"
+            info_file = os.path.join(args.model_path, "train_info.json")
+            if os.path.exists(info_file):
+                try:
+                    with open(info_file, "r") as f:
+                        old_info = json.load(f)
+                        existing_branch = old_info.get("git_branch", "unknown")
+                except Exception:
+                    pass
+            
+            if existing_branch == "unknown":
+                existing_branch = get_git_branch()
+                
+            # Use last modified time of the directory for the backup timestamp
+            mtime = os.path.getmtime(args.model_path)
+            timestamp = datetime.datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
+            
+            backup_path = f"{args.model_path.rstrip('/')}_backup_{existing_branch}_{timestamp}"
+            print(f"Output folder already exists and is not empty. Moving old run to: {backup_path}")
+            try:
+                os.rename(args.model_path, backup_path)
+            except Exception as e:
+                print(f"Warning: Could not rename existing output folder: {e}")
 
     print("Output folder:", args.model_path)
     os.makedirs(args.model_path, exist_ok=True)
