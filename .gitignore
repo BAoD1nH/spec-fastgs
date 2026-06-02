@@ -32,3 +32,4 @@ __pycache__/
 /submodules/
 /output_spec_fastgs/
 Specular-Gaussians/
+docs/
