@@ -69,11 +69,16 @@ class SpecularModel:
         self.optimizer = torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
         # scheduler (same style as SG)
+        specular_start_iter = getattr(training_args, "specular_start_iter", 3000)
+        max_steps = training_args.iterations - specular_start_iter
+        if max_steps <= 0:
+            max_steps = training_args.specular_lr_max_steps
+
         self.specular_scheduler_args = get_linear_noise_func(
             lr_init=training_args.feature_lr,
             lr_final=training_args.feature_lr / 20,
             lr_delay_mult=training_args.position_lr_delay_mult,
-            max_steps=training_args.specular_lr_max_steps
+            max_steps=max_steps
         )
 
     # ------------------------------------------------------------

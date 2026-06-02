@@ -107,6 +107,7 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
 
         self.specular_lr_max_steps = 30000
+        self.specular_start_iter = 15000
         
         super().__init__(parser, "Optimization Parameters")
 

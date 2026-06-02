@@ -117,7 +117,7 @@ def training(dataset, opt, pipe):
         vis_indices: torch.Tensor | None = None   # indices of evaluated Gaussians
         mlp_color: torch.Tensor | None = None     # full-scene buffer  [N, 3]
 
-        if iteration > 3000:
+        if iteration > opt.specular_start_iter:
             n_gs = gaussians.get_xyz.shape[0]
             asg_feat = gaussians.get_asg_features  # [N, 24]
 
@@ -200,7 +200,7 @@ def training(dataset, opt, pipe):
         # This prevents SH from absorbing highlight residuals while specular learns.
         # Minimal parameters (tunable): spec_start, spec_freeze_steps, sh_grad_scale
         # --------------------------------------------------------
-        spec_start = 3000  # must match when specular is enabled
+        spec_start = opt.specular_start_iter  # must match when specular is enabled
         spec_freeze_steps = 2000  # number of iterations to reduce SH learning
         sh_grad_scale = 0.01  # scale applied to SH gradients (0 disables updates)
 
@@ -221,8 +221,9 @@ def training(dataset, opt, pipe):
         gaussians.optimizer_step(iteration, skip_sh=skip_sh)
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
-        specular_mlp.update_learning_rate(iteration)
-        specular_mlp.optimizer_step()
+        if iteration > opt.specular_start_iter:
+            specular_mlp.update_learning_rate(iteration - opt.specular_start_iter)
+            specular_mlp.optimizer_step()
 
         # --------------------------------------------------------
         # LOG
@@ -253,6 +254,7 @@ def training(dataset, opt, pipe):
                 iteration > opt.densify_from_iter and
                 iteration % opt.densification_interval == 0
             ):
+                size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                 camlist = sampling_cameras(scene.getTrainCameras().copy())
 
                 with torch.no_grad():
@@ -261,7 +263,7 @@ def training(dataset, opt, pipe):
                     )
 
                 gaussians.densify_and_prune_fastgs(
-                    max_screen_size=None,
+                    max_screen_size=size_threshold,
                     min_opacity=0.005,
                     extent=scene.cameras_extent,
                     radii=radii,
