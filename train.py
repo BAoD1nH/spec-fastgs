@@ -196,6 +196,49 @@ def training(dataset, opt, pipe):
         loss.backward()
 
         # --------------------------------------------------------
+        # DECOUPLED DENSIFICATION (METHOD 2)
+        # --------------------------------------------------------
+        viewspace_point_tensor_final = viewspace_point_tensor
+        visibility_filter_final = visibility_filter
+        radii_final = radii
+
+        if iteration > opt.specular_start_iter and iteration < opt.densify_until_iter:
+            render_pkg_sh = render_fastgs(
+                cam,
+                gaussians,
+                pipe,
+                background,
+                opt.mult,
+                mlp_color=None  # SH-only
+            )
+            image_sh = render_pkg_sh["render"]
+            viewspace_point_tensor_sh = render_pkg_sh["viewspace_points"]
+            visibility_filter_sh = render_pkg_sh["visibility_filter"]
+            radii_sh = render_pkg_sh["radii"]
+            
+            Ll1_sh = l1_loss(image_sh, gt)
+            ssim_val_sh = fast_ssim(image_sh.unsqueeze(0), gt.unsqueeze(0))
+            loss_sh = (
+                (1.0 - opt.lambda_dssim) * Ll1_sh
+                + opt.lambda_dssim * (1.0 - ssim_val_sh)
+            )
+            
+            geom_grad = torch.autograd.grad(
+                outputs=loss_sh,
+                inputs=viewspace_point_tensor_sh,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True
+            )[0]
+            
+            if geom_grad is not None:
+                viewspace_point_tensor_sh.grad = geom_grad
+            
+            viewspace_point_tensor_final = viewspace_point_tensor_sh
+            visibility_filter_final = visibility_filter_sh
+            radii_final = radii_sh
+
+        # --------------------------------------------------------
         # Reduce SH competition: scale down SH gradients for a window after specular activation
         # This prevents SH from absorbing highlight residuals while specular learns.
         # Minimal parameters (tunable): spec_start, spec_freeze_steps, sh_grad_scale
@@ -240,14 +283,14 @@ def training(dataset, opt, pipe):
 
         if iteration < opt.densify_until_iter:
 
-            gaussians.max_radii2D[visibility_filter] = torch.max(
-                gaussians.max_radii2D[visibility_filter],
-                radii[visibility_filter]
+            gaussians.max_radii2D[visibility_filter_final] = torch.max(
+                gaussians.max_radii2D[visibility_filter_final],
+                radii_final[visibility_filter_final]
             )
 
             gaussians.add_densification_stats(
-                viewspace_point_tensor,
-                visibility_filter
+                viewspace_point_tensor_final,
+                visibility_filter_final
             )
 
             if (
@@ -266,7 +309,7 @@ def training(dataset, opt, pipe):
                     max_screen_size=size_threshold,
                     min_opacity=0.005,
                     extent=scene.cameras_extent,
-                    radii=radii,
+                    radii=radii_final,
                     args=opt,
                     importance_score=importance_score,
                     pruning_score=pruning_score
