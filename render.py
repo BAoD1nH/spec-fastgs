@@ -105,13 +105,6 @@ def render_set(
         # Specular image = full - SH
         spec_image = rendering - sh_image
 
-        # 1) Amplified specular (for visibility)
-        amp_factor = 10.0
-        spec_scaled = (spec_image * amp_factor).clamp(0.0, 1.0)
-        torchvision.utils.save_image(
-            spec_scaled,
-            os.path.join(spec_path, f"{idx:05d}_spec_scaled.png")
-        )
 
         # 2) Normalized specular (min-max to [0,1])
         minv = spec_image.min()
@@ -121,23 +114,43 @@ def render_set(
         else:
             spec_norm = spec_image.clone()
         spec_norm = spec_norm.clamp(0.0, 1.0)
+        # Create subfolder for this frame
+        frame_spec_dir = os.path.join(spec_path, f"{idx:05d}")
+        makedirs(frame_spec_dir, exist_ok=True)
+
+        # 1) Diffuse (SH-only)
         torchvision.utils.save_image(
-            spec_norm,
-            os.path.join(spec_path, f"{idx:05d}_spec_norm.png")
+            sh_image.clamp(0.0, 1.0),
+            os.path.join(frame_spec_dir, "1_diffuse.png")
         )
 
-        # 3) Residual (absolute GT - SH) and scaled for visualization
+        # 2) Composite (diffuse + spec_norm)
+        composite = (sh_image + spec_norm).clamp(0.0, 1.0)
+        torchvision.utils.save_image(
+            composite,
+            os.path.join(frame_spec_dir, "2_composite.png")
+        )
+
+        # 3) Ground Truth (GT)
+        torchvision.utils.save_image(
+            gt,
+            os.path.join(frame_spec_dir, "3_gt.png")
+        )
+
+        # 4) Normalized specular
+        torchvision.utils.save_image(
+            spec_norm,
+            os.path.join(frame_spec_dir, "4_spec_norm.png")
+        )
+
+        # 5) Residual (absolute GT - SH) and scaled for visualization
         residual = (gt - sh_image).abs()
         residual_scale = 5.0
         residual_vis = (residual * residual_scale).clamp(0.0, 1.0)
         torchvision.utils.save_image(
             residual_vis,
-            os.path.join(spec_path, f"{idx:05d}_residual.png")
+            os.path.join(frame_spec_dir, "5_residual.png")
         )
-
-        # --------------------------------------------------------
-        # SAVE RENDERS (original behavior)
-        # --------------------------------------------------------
 
         torchvision.utils.save_image(
             rendering,
@@ -149,46 +162,7 @@ def render_set(
             os.path.join(gts_path, f"{idx:05d}.png")
         )
 
-        # --------------------------------------------------------
-        # SPECULAR SHARP PASS (minimal change)
-        # Render specular only with reduced spatial smoothing by using
-        # a smaller scaling_modifier for the specular pass. Do not
-        # change the diffuse SH rendering above.
-        # --------------------------------------------------------
 
-        # Only run this pass if we actually have a specular contribution
-        if mlp_color is not None:
-            # smaller scaling modifier for sharper splats (tune 0.3-0.5)
-            spec_scaling_modifier = 0.35
-
-            # override_color set to zero so renderer composes only mlp_color
-            zeros_override = torch.zeros((gaussians.get_xyz.shape[0], 3), dtype=gaussians.get_xyz.dtype, device="cuda")
-
-            spec_sharp_pkg = render_fastgs(
-                view,
-                gaussians,
-                pipeline,
-                background,
-                args.mult,
-                mlp_color=mlp_color,
-                scaling_modifier=spec_scaling_modifier,
-                override_color=zeros_override
-            )
-
-            spec_sharp = spec_sharp_pkg["render"]
-
-            # Save specular-only sharp render and a composite with the original SH
-            torchvision.utils.save_image(
-                spec_sharp.clamp(0.0, 1.0),
-                os.path.join(spec_path, f"{idx:05d}_spec_sharp.png")
-            )
-
-            # Composite: original SH (from sh_image) + sharp specular
-            composite_sharp = (sh_image + spec_sharp).clamp(0.0, 1.0)
-            torchvision.utils.save_image(
-                composite_sharp,
-                os.path.join(spec_path, f"{idx:05d}_sharp_composite.png")
-            )
 
         # --------------------------------------------------------
         # end frame loop
