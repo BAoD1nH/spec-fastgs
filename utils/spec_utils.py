@@ -78,15 +78,11 @@ class ASGRender(nn.Module):
             1   # normal dot viewdir
         )
 
-        self.mlp = nn.Sequential(
-            nn.Linear(self.in_mlpC, featureC),
-            nn.ReLU(True),
-            nn.Linear(featureC, featureC),
-            nn.ReLU(True),
-            nn.Linear(featureC, 3)
-        )
+        self.fc1 = nn.Linear(self.in_mlpC, featureC)
+        self.fc2 = nn.Linear(featureC, featureC)
+        self.fc3 = nn.Linear(featureC, 3)
 
-        nn.init.constant_(self.mlp[-1].bias, 0)
+        nn.init.constant_(self.fc3.bias, 0)
 
     def reflect(self, viewdir, normal):
         return 2 * (viewdir * normal).sum(dim=-1, keepdim=True) * normal - viewdir
@@ -121,7 +117,9 @@ class ASGRender(nn.Module):
 
         mlp_input = torch.cat(inputs, dim=-1)
 
-        rgb = self.mlp(mlp_input)
+        h1 = F.relu(self.fc1(mlp_input))
+        h2 = F.relu(self.fc2(h1)) + h1
+        rgb = self.fc3(h2)
 
         return rgb
 
