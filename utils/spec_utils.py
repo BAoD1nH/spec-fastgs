@@ -121,7 +121,7 @@ class ASGRender(nn.Module):
 
         mlp_input = torch.cat(inputs, dim=-1)
 
-        rgb = torch.sigmoid(self.mlp(mlp_input))
+        rgb = self.mlp(mlp_input)
 
         return rgb
 
