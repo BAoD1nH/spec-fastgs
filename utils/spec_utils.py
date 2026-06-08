@@ -164,9 +164,14 @@ class SpecularNetworkReal(nn.Module):
     def __init__(self, is_indoor=False):
         super().__init__()
 
+        # Capacity bump (fix #1): the previous real variant used featureC=32 and
+        # only 2x4=8 ASG lobes, which cannot represent sharp high-frequency
+        # specular (metal/glass) — measured as dim, blurry, decorrelated highlights
+        # (low energyRatio / low NCC vs GT). Match the full SpecularNetwork:
+        # featureC=128 and 4x8=32 ASG lobes.
         self.asg_feature = 24
-        self.num_theta = 2
-        self.num_phi = 4
+        self.num_theta = 4
+        self.num_phi = 8
 
         self.asg_hidden = self.num_theta * self.num_phi * 4
 
@@ -174,7 +179,7 @@ class SpecularNetworkReal(nn.Module):
 
         self.render_module = ASGRender(
             viewpe=2,
-            featureC=32,
+            featureC=128,
             num_theta=self.num_theta,
             num_phi=self.num_phi
         )

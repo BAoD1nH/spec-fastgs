@@ -67,11 +67,16 @@ def training(dataset, opt, pipe):
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training")
     ema_loss = 0.0
 
-    # ── Phase A: cached boolean visibility mask for sparse MLP evaluation ──
-    # Initialized to None; set each iteration from the rasterizer's radii output.
-    # After densification the Gaussian count changes, so we detect size mismatch
-    # and fall back to evaluating the full set for that single step.
-    prev_vis_mask: torch.Tensor | None = None
+    # ── Phase A: per-camera cached visibility mask for sparse MLP evaluation ──
+    # Fix #2: cameras are sampled RANDOMLY each iteration, so a single previous-
+    # iteration mask came from an unrelated view — the MLP was being run on the
+    # wrong Gaussians, starving specular supervision (measured low NCC vs GT).
+    # Instead we cache visibility PER CAMERA (keyed by cam.uid): the mask reused
+    # for a given view is from the last time that SAME view was rendered, which
+    # is a stable predictor since geometry drifts slowly.
+    # After densification the Gaussian count changes → size mismatch is detected
+    # and we fall back to evaluating the full set for that single step.
+    vis_cache: dict = {}
 
     for iteration in progress_bar:
 
@@ -121,11 +126,14 @@ def training(dataset, opt, pipe):
             n_gs = gaussians.get_xyz.shape[0]
             asg_feat = gaussians.get_asg_features  # [N, 24]
 
-            # Determine which Gaussians to evaluate
-            if prev_vis_mask is not None and prev_vis_mask.shape[0] == n_gs:
-                vis_indices = prev_vis_mask.nonzero(as_tuple=False).squeeze(1)  # [M]
+            # Determine which Gaussians to evaluate — use THIS camera's last mask
+            cached_mask = vis_cache.get(cam.uid)
+            if cached_mask is not None and cached_mask.shape[0] == n_gs:
+                # cached_mask lives on CPU (saves VRAM across many cameras);
+                # move only the small index list to the GPU.
+                vis_indices = cached_mask.nonzero(as_tuple=False).squeeze(1).to("cuda")  # [M]
             else:
-                # First specular step OR count changed after densification
+                # First time this camera is seen OR count changed after densification
                 vis_indices = torch.arange(n_gs, device="cuda")
 
             if vis_indices.numel() > 0:
@@ -158,10 +166,11 @@ def training(dataset, opt, pipe):
         visibility_filter     = render_pkg["visibility_filter"]
         radii                 = render_pkg["radii"]
 
-        # ── Update cached visibility mask for the NEXT iteration ──────────
+        # ── Update THIS camera's cached visibility mask ───────────────────
         # radii has shape [N]; (radii > 0) gives the boolean visibility mask.
-        # We store it here so the next step uses it without an extra render.
-        prev_vis_mask = (radii > 0)  # [N] bool
+        # Stored per-camera (on CPU to bound VRAM) so the next time this exact
+        # view is sampled the MLP runs on the Gaussians actually visible from it.
+        vis_cache[cam.uid] = (radii > 0).cpu()  # [N] bool, CPU
 
         # --------------------------------------------------------
         # LOSS
