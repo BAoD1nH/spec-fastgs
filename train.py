@@ -58,6 +58,21 @@ def training(dataset, opt, pipe):
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     # ------------------------------------------------------------
+    # LOAD REFLECTION PRIORS (If available)
+    # ------------------------------------------------------------
+    import imageio
+    ref_prior_dir = os.path.join(dataset.source_path, "ref_priors")
+    if os.path.exists(ref_prior_dir):
+        print("Loading Reflection Priors...")
+        for cam in scene.getTrainCameras():
+            npath = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_score.png")
+            if os.path.exists(npath):
+                try:
+                    cam.ref_score = torch.tensor(imageio.imread(npath) / 255.0, dtype=torch.float32).cuda()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------
     # TRAIN LOOP
     # ------------------------------------------------------------
 
@@ -184,6 +199,12 @@ def training(dataset, opt, pipe):
             (1.0 - opt.lambda_dssim) * Ll1
             + opt.lambda_dssim * (1.0 - ssim_val)
         )
+        
+        # RSA-Loss: Highlight-Aware Specular Attention
+        if hasattr(cam, 'ref_score'):
+            l1_per_pixel = torch.abs(image - gt) # [3, H, W]
+            L_specular_attention = (l1_per_pixel * cam.ref_score.unsqueeze(0)).mean()
+            photometric_loss = photometric_loss + 1.0 * L_specular_attention
 
         # Gaussian-space specular regulariser (no extra render needed)
         if spec_sparse is not None:

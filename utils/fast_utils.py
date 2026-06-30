@@ -79,6 +79,10 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         get_flag = True
         l1_loss_norm = get_loss(render_image, gt_image)
         
+        # RSA-Densify: Reflection-Aware Densification
+        if hasattr(my_viewpoint_cam, 'ref_score'):
+            l1_loss_norm = l1_loss_norm * (1.0 + 2.0 * my_viewpoint_cam.ref_score.unsqueeze(0).cuda())
+            
         metric_map = (l1_loss_norm > args.loss_thresh).int()
 
         render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
