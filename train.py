@@ -200,14 +200,24 @@ def training(dataset, opt, pipe):
             + opt.lambda_dssim * (1.0 - ssim_val)
         )
         
-        # RSA-Loss: Highlight-Aware Specular Attention
-        if hasattr(cam, 'ref_score'):
-            l1_per_pixel = torch.abs(image - gt) # [3, H, W]
-            L_specular_attention = (l1_per_pixel * cam.ref_score.unsqueeze(0)).mean()
-            photometric_loss = photometric_loss + 1.0 * L_specular_attention
-
-        # Gaussian-space specular regulariser (no extra render needed)
-        if spec_sparse is not None:
+        # Explicit Specular Suppression
+        if spec_sparse is not None and hasattr(cam, 'ref_score') and vis_indices.shape[0] > 0:
+            H, W = cam.image_height, cam.image_width
+            u = viewspace_point_tensor[vis_indices, 0]
+            v = viewspace_point_tensor[vis_indices, 1]
+            u_ndc = (u / W) * 2.0 - 1.0
+            v_ndc = (v / H) * 2.0 - 1.0
+            uv_ndc = torch.stack([u_ndc, v_ndc], dim=-1).unsqueeze(0).unsqueeze(0)
+            sampled_ref_score = torch.nn.functional.grid_sample(
+                cam.ref_score.unsqueeze(0).unsqueeze(0),
+                uv_ndc,
+                align_corners=True,
+                padding_mode="border"
+            ).squeeze()
+            
+            L_reg_new = ((1.0 - sampled_ref_score) * torch.norm(spec_sparse, p=2, dim=-1)).mean()
+            spec_reg = 0.003 * L_reg_new
+        elif spec_sparse is not None:
             spec_reg = spec_sparse.pow(2).mean() * 0.0
         else:
             spec_reg = 0.0
