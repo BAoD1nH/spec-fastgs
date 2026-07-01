@@ -80,7 +80,7 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         l1_loss_norm = get_loss(render_image, gt_image)
         # RSA-Densify: Adaptive Error Suppression
         if hasattr(my_viewpoint_cam, 'ref_score'):
-            l1_loss_norm = l1_loss_norm * (1.0 + 1.0 * my_viewpoint_cam.ref_score.unsqueeze(0).cuda())
+            l1_loss_norm = l1_loss_norm * (0.5 + 1.0 * my_viewpoint_cam.ref_score.unsqueeze(0).cuda())
             
         metric_map = (l1_loss_norm > args.loss_thresh).int()
 
