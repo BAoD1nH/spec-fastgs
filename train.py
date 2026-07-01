@@ -68,7 +68,15 @@ def training(dataset, opt, pipe):
             npath = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_score.png")
             if os.path.exists(npath):
                 try:
-                    cam.ref_score = torch.tensor(imageio.imread(npath) / 255.0, dtype=torch.float32).cuda()
+                    ref_tensor = torch.tensor(imageio.imread(npath) / 255.0, dtype=torch.float32).cuda()
+                    if ref_tensor.shape[0] != cam.image_height or ref_tensor.shape[1] != cam.image_width:
+                        ref_tensor = torch.nn.functional.interpolate(
+                            ref_tensor.unsqueeze(0).unsqueeze(0),
+                            size=(cam.image_height, cam.image_width),
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze()
+                    cam.ref_score = ref_tensor
                 except Exception:
                     pass
 
@@ -200,24 +208,8 @@ def training(dataset, opt, pipe):
             + opt.lambda_dssim * (1.0 - ssim_val)
         )
         
-        # Explicit Specular Suppression
-        if spec_sparse is not None and hasattr(cam, 'ref_score') and vis_indices.shape[0] > 0:
-            H, W = cam.image_height, cam.image_width
-            u = viewspace_point_tensor[vis_indices, 0]
-            v = viewspace_point_tensor[vis_indices, 1]
-            u_ndc = (u / W) * 2.0 - 1.0
-            v_ndc = (v / H) * 2.0 - 1.0
-            uv_ndc = torch.stack([u_ndc, v_ndc], dim=-1).unsqueeze(0).unsqueeze(0)
-            sampled_ref_score = torch.nn.functional.grid_sample(
-                cam.ref_score.unsqueeze(0).unsqueeze(0),
-                uv_ndc,
-                align_corners=True,
-                padding_mode="border"
-            ).squeeze()
-            
-            L_reg_new = ((1.0 - sampled_ref_score) * torch.norm(spec_sparse, p=2, dim=-1)).mean()
-            spec_reg = 0.003 * L_reg_new
-        elif spec_sparse is not None:
+        # Explicit Specular Suppression removed, reverting to v2.2 behavior
+        if spec_sparse is not None:
             spec_reg = spec_sparse.pow(2).mean() * 0.0
         else:
             spec_reg = 0.0

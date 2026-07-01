@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0
 DATA_ROOT=./datasets/mipnerf360
 OUTPUT_ROOT=./output
 SCENE=counter
-IMAGES=images_4
+IMAGES=images
 
 # 1. TRAIN
 python train.py \
