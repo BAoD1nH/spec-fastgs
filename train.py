@@ -171,7 +171,10 @@ def training(dataset, opt, pipe):
                         ref_score_tensor, ndc_grid, align_corners=False, padding_mode='border'
                     ).view(-1)  # [M]
 
-                    spec_sparse = spec_sparse * sampled_ref_score.unsqueeze(-1)
+                    # --- ASG GRADIENT BOOSTING ---
+                    # Boost gradients flowing into ASG by 10x in specular regions (Ref Score = 1)
+                    boost_mask = 1.0 + 9.0 * sampled_ref_score.unsqueeze(-1)
+                    spec_sparse.register_hook(lambda grad, bm=boost_mask: grad * bm)
 
                 # Scatter back into a full-scene buffer; index_put preserves grad
                 mlp_color = torch.zeros(
@@ -217,7 +220,6 @@ def training(dataset, opt, pipe):
 
         Ll1      = l1_loss(image, gt)
         ssim_val = fast_ssim(image.unsqueeze(0), gt.unsqueeze(0))
-
         photometric_loss = (
             (1.0 - opt.lambda_dssim) * Ll1
             + opt.lambda_dssim * (1.0 - ssim_val)
@@ -233,29 +235,13 @@ def training(dataset, opt, pipe):
 
         loss.backward()
 
-        # --------------------------------------------------------
-        # Reduce SH competition: scale down SH gradients for a window after specular activation
-        # This prevents SH from absorbing highlight residuals while specular learns.
-        # Minimal parameters (tunable): spec_start, spec_freeze_steps, sh_grad_scale
-        # --------------------------------------------------------
-        spec_start = opt.specular_start_iter  # must match when specular is enabled
-        spec_freeze_steps = 2000  # number of iterations to reduce SH learning
-        sh_grad_scale = 0.01  # scale applied to SH gradients (0 disables updates)
-
-        if iteration > spec_start and iteration <= spec_start + spec_freeze_steps:
-            try:
-                if hasattr(gaussians, "_features_rest") and gaussians._features_rest.grad is not None:
-                    gaussians._features_rest.grad.mul_(sh_grad_scale)
-                if hasattr(gaussians, "_features_dc") and gaussians._features_dc.grad is not None:
-                    gaussians._features_dc.grad.mul_(sh_grad_scale)
-            except Exception:
-                pass
 
         # --------------------------------------------------------
         # OPTIMIZER STEP
         # --------------------------------------------------------
 
-        skip_sh = (iteration > spec_start and iteration <= spec_start + spec_freeze_steps)
+        # Set skip_sh=False because we now use fine-grained gradient scaling per-Gaussian
+        skip_sh = False
         gaussians.optimizer_step(iteration, skip_sh=skip_sh)
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
@@ -283,8 +269,21 @@ def training(dataset, opt, pipe):
                 radii[visibility_filter]
             )
 
+            # --- GUIDED DENSIFICATION ---
+            # Bơm thêm gradient tọa độ ở vùng lóa sáng để kích hoạt Densification
+            viewspace_grad = viewspace_point_tensor.grad.clone()
+            if hasattr(cam, 'ref_score') and 'sampled_ref_score' in locals() and 'vis_indices' in locals():
+                densify_boost = 1.0 + 9.0 * sampled_ref_score.unsqueeze(-1)
+                viewspace_grad[vis_indices, :2] = viewspace_grad[vis_indices, :2] * densify_boost
+
+            class DummyTensor:
+                def __init__(self, grad):
+                    self.grad = grad
+            
+            dummy_viewspace = DummyTensor(viewspace_grad)
+
             gaussians.add_densification_stats(
-                viewspace_point_tensor,
+                dummy_viewspace,
                 visibility_filter
             )
 
