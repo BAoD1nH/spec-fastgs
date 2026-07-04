@@ -62,11 +62,27 @@ def render_set(
         # SPECULAR
         # --------------------------------------------------------
 
-        mlp_color = specular_mlp.step(
+        spec_sparse = specular_mlp.step(
             gaussians.get_asg_features.to("cuda"),
             viewdir,
             normal
         )
+
+        if hasattr(view, 'ref_score'):
+            import torch.nn.functional as F_nn
+            xyz_homo = torch.cat([xyz, torch.ones_like(xyz[..., :1])], dim=-1)
+            clip_space = xyz_homo @ view.full_proj_transform
+            ndc_space = clip_space[..., :2] / (clip_space[..., 3:4] + 1e-6)
+            ndc_space[..., 1] *= -1 
+            ref_score_tensor = view.ref_score.unsqueeze(0).unsqueeze(0).cuda()
+            ndc_grid = ndc_space.unsqueeze(0).unsqueeze(0)
+            sampled_ref_score = F_nn.grid_sample(
+                ref_score_tensor, ndc_grid, align_corners=False, padding_mode='border'
+            ).view(-1)
+            
+            mlp_color = spec_sparse * sampled_ref_score.unsqueeze(-1)
+        else:
+            mlp_color = spec_sparse
 
         # --------------------------------------------------------
         # DEBUG VISUALIZATIONS (SH-only, specular diagnostics)
@@ -178,6 +194,28 @@ def render_sets(
 
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+
+        # --------------------------------------------------------
+        # LOAD REFLECTION PRIORS
+        # --------------------------------------------------------
+        import imageio
+        import torch.nn.functional as F_nn
+        ref_prior_dir = os.path.join(dataset.source_path, "reflection_prior")
+        if os.path.exists(ref_prior_dir):
+            print("Loading Reflection Priors...")
+            for cam in scene.getTrainCameras() + scene.getTestCameras():
+                npath = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_score.png")
+                if os.path.exists(npath):
+                    try:
+                        ref_tensor = torch.tensor(imageio.imread(npath) / 255.0, dtype=torch.float32)
+                        if ref_tensor.shape[0] != cam.image_height or ref_tensor.shape[1] != cam.image_width:
+                            ref_tensor = F_nn.interpolate(
+                                ref_tensor.unsqueeze(0).unsqueeze(0), size=(cam.image_height, cam.image_width),
+                                mode='bilinear', align_corners=False
+                            ).squeeze()
+                        cam.ref_score = ref_tensor
+                    except Exception:
+                        pass
 
         # ✅ LOAD ASG FEATURE
         asg_path = os.path.join(
