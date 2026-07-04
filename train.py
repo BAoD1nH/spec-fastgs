@@ -235,6 +235,15 @@ def training(dataset, opt, pipe):
 
         loss.backward()
 
+        # --- DYNAMIC SH DEGREE RESTRICTION (v6) ---
+        # Suppress gradients for higher-order SH (Bậc 1,2,3) in specular regions.
+        # This forces SH to behave as Degree 0 (diffuse only) in specular regions,
+        # leaving the view-dependent high-frequency highlight entirely for ASG.
+        with torch.no_grad():
+            if hasattr(cam, 'ref_score') and 'sampled_ref_score' in locals() and 'vis_indices' in locals():
+                if gaussians._features_rest.grad is not None:
+                    sh_rest_suppression = 1.0 - 0.99 * sampled_ref_score
+                    gaussians._features_rest.grad[vis_indices] *= sh_rest_suppression.unsqueeze(-1).unsqueeze(-1)
 
         # --------------------------------------------------------
         # OPTIMIZER STEP
@@ -270,12 +279,9 @@ def training(dataset, opt, pipe):
             )
 
             # --- GUIDED DENSIFICATION ---
-            # Bơm thêm gradient tọa độ ở vùng lóa sáng để kích hoạt Densification
+            # Trả lại quyền kiểm soát sinh hạt cho cơ chế ADC của FastGS
             viewspace_grad = viewspace_point_tensor.grad.clone()
-            if hasattr(cam, 'ref_score') and 'sampled_ref_score' in locals() and 'vis_indices' in locals():
-                densify_boost = 1.0 + 9.0 * sampled_ref_score.unsqueeze(-1)
-                viewspace_grad[vis_indices, :2] = viewspace_grad[vis_indices, :2] * densify_boost
-
+            
             class DummyTensor:
                 def __init__(self, grad):
                     self.grad = grad
