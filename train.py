@@ -302,7 +302,7 @@ def training(dataset, opt, pipe):
 
                 with torch.no_grad():
                     importance_score, pruning_score = compute_gaussian_score_fastgs(
-                        camlist, gaussians, pipe, background, opt, DENSIFY=True
+                        camlist, gaussians, pipe, background, opt, DENSIFY=True, iteration=iteration
                     )
 
                 gaussians.densify_and_prune_fastgs(

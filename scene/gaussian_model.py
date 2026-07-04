@@ -522,11 +522,13 @@ class GaussianModel:
         all_splits = torch.logical_and(split_qualifiers, grad_qualifiers_abs)
 
         # This is our multi-view consisent metric for densification
-        # We use this metric to further filter the candidates for densification, which is similar to taming 3dgs.
         metric_mask = importance_score > 5
+        
+        final_clones = torch.logical_and(clone_qualifiers, grad_qualifiers)
+        final_splits = torch.logical_and(split_qualifiers, grad_qualifiers_abs)
 
-        self.densify_and_clone_fastgs(metric_mask, all_clones)
-        self.densify_and_split_fastgs(metric_mask, all_splits)
+        self.densify_and_clone_fastgs(metric_mask, final_clones)
+        self.densify_and_split_fastgs(metric_mask, final_splits)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

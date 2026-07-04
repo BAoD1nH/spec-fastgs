@@ -33,8 +33,9 @@ python train.py \
     --sh_degree 3 \
     --highfeature_lr 0.02 \
     --grad_abs_thresh 0.0004 \
-    --specular_start_iter 3000
-
+    --specular_start_iter 3000 \
+    --densification_refscore_interval 3000 \
+    --max_refscore_gaussians 200000
 # 2. RENDER
 python render.py \
     -m ${OUTPUT_ROOT}/${SCENE} \

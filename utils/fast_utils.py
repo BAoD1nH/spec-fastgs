@@ -42,7 +42,7 @@ def normalize(config_value, value_tensor):
 
     return ret_value
 
-def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = False):
+def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY, iteration=None):
     """Compute multi-view consistency scores for Gaussians to guide densification.
 
     For each camera in `camlist` the function renders the scene and computes a
@@ -78,11 +78,20 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         gt_image = my_viewpoint_cam.original_image.cuda()
         get_flag = True
         l1_loss_norm = get_loss(render_image, gt_image)
-        # RSA-Densify: Adaptive Error Suppression
-        if hasattr(my_viewpoint_cam, 'ref_score'):
-            l1_loss_norm = l1_loss_norm * (0.5 + 1.0 * my_viewpoint_cam.ref_score.unsqueeze(0).cuda())
             
         metric_map = (l1_loss_norm > args.loss_thresh).int()
+
+        # V7 ADC Modification: Force densification in Ref Score regions
+        # Tắt tính năng sinh Gaussians nếu vượt quá budget hoặc chưa đến interval
+        use_ref_score = False
+        if hasattr(my_viewpoint_cam, 'ref_score') and iteration is not None:
+            if iteration % args.densification_refscore_interval == 0:
+                if gaussians.get_xyz.shape[0] < args.max_refscore_gaussians:
+                    use_ref_score = True
+
+        if use_ref_score:
+            ref_mask = (my_viewpoint_cam.ref_score.cuda() > 0.5).int()
+            metric_map = torch.max(metric_map, ref_mask)
 
         render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
 
