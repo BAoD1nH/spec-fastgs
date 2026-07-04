@@ -61,7 +61,7 @@ def training(dataset, opt, pipe):
     # LOAD REFLECTION PRIORS (If available)
     # ------------------------------------------------------------
     import imageio
-    ref_prior_dir = os.path.join(dataset.source_path, "ref_priors")
+    ref_prior_dir = os.path.join(dataset.source_path, "reflection_prior")
     if os.path.exists(ref_prior_dir):
         print("Loading Reflection Priors...")
         for cam in scene.getTrainCameras():
@@ -157,6 +157,21 @@ def training(dataset, opt, pipe):
                     viewdir[vis_indices],
                     normal[vis_indices],
                 )  # [M, 3]
+
+                if hasattr(cam, 'ref_score'):
+                    import torch.nn.functional as F_nn
+                    xyz_vis = gaussians.get_xyz[vis_indices]
+                    xyz_homo = torch.cat([xyz_vis, torch.ones_like(xyz_vis[..., :1])], dim=-1)
+                    clip_space = xyz_homo @ cam.full_proj_transform
+                    ndc_space = clip_space[..., :2] / (clip_space[..., 3:4] + 1e-6)
+                    ndc_space[..., 1] *= -1  # Flip Y-axis to match PyTorch grid_sample top-to-bottom convention
+                    ref_score_tensor = cam.ref_score.unsqueeze(0).unsqueeze(0)
+                    ndc_grid = ndc_space.unsqueeze(0).unsqueeze(0)
+                    sampled_ref_score = F_nn.grid_sample(
+                        ref_score_tensor, ndc_grid, align_corners=False, padding_mode='border'
+                    ).view(-1)  # [M]
+
+                    spec_sparse = spec_sparse * sampled_ref_score.unsqueeze(-1)
 
                 # Scatter back into a full-scene buffer; index_put preserves grad
                 mlp_color = torch.zeros(

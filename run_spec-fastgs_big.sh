@@ -9,9 +9,16 @@ export CUDA_VISIBLE_DEVICES=0
 DATA_ROOT=./datasets/mipnerf360
 OUTPUT_ROOT=./output
 SCENE=counter
-IMAGES=images_4
+IMAGES=images_8
+
+# 0. EXTRACT REFLECTION PRIOR
+echo "[0/3] Running extract_reflection_prior.py..."
+python extract_reflection_prior.py \
+    -s ${DATA_ROOT}/${SCENE} \
+    -i ${IMAGES}
 
 # 1. TRAIN
+echo "[1/3] Running train.py..."
 python train.py \
     -s ${DATA_ROOT}/${SCENE} \
     -m ${OUTPUT_ROOT}/${SCENE} \
