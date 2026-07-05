@@ -84,7 +84,7 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY, i
         # V7 ADC Modification: Force densification in Ref Score regions
         # Tắt tính năng sinh Gaussians nếu vượt quá budget hoặc chưa đến interval
         use_ref_score = False
-        if hasattr(my_viewpoint_cam, 'ref_score') and iteration is not None:
+        if hasattr(my_viewpoint_cam, 'ref_score') and iteration is not None and not getattr(args, 'disable_ref_score', False):
             if iteration % args.densification_refscore_interval == 0:
                 if gaussians.get_xyz.shape[0] < args.max_refscore_gaussians:
                     use_ref_score = True

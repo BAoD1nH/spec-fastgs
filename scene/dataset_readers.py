@@ -253,7 +253,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             T = w2c[:3, 3]
 
             image_path = os.path.join(path, cam_name)
-            image_name = Path(cam_name).stem
+            # Retain subfolder name (train or test) to keep original folder structure
+            subfolder = Path(frame["file_path"]).parent.name
+            stem = Path(cam_name).stem
+            image_name = f"{subfolder}/{stem}" if subfolder else stem
+            
             image = Image.open(image_path)
 
             im_data = np.array(image.convert("RGBA"))

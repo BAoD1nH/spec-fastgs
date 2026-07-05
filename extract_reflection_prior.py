@@ -13,22 +13,26 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 from arguments import ModelParams
 
-def tan_ikeuchi_score(img01, thresh=0.35, bright_floor=0.6):
+def shafer_klinker_score(img01, intensity_thresh=0.7, sat_thresh=0.2):
     """
-    Tan & Ikeuchi (2005) specular-free image logic.
-    img01: [H, W, 3] float array in [0, 1]
-    Returns mask and score.
+    Shafer/Klinker Dichromatic Reflection Model approximation.
+    Identifies pixels that are bright (high intensity) and white/gray (low saturation).
     """
-    Imin = img01.min(axis=-1)
     Imax = img01.max(axis=-1)
-    score = Imin
-    mask = (score > thresh) & (Imax > bright_floor)
+    Imin = img01.min(axis=-1)
     
-    # We'll use the masked score directly as the Ref Score.
-    # Where mask is false, score is 0.
+    # Saturation (avoid division by zero)
+    saturation = 1.0 - (Imin / (Imax + 1e-6))
+    
+    # Mask: Bright AND Low Saturation
+    mask = (Imax > intensity_thresh) & (saturation < sat_thresh)
+    
+    # Score: How close it is to perfect white specular
+    # Higher Imax and lower saturation -> higher score
+    score = Imax * (1.0 - saturation)
+    
     final_score = np.where(mask, score, 0.0)
     
-    # Normalize to [0, 1] if there are any specular pixels
     if final_score.max() > 0:
         final_score = final_score / final_score.max()
         
@@ -50,7 +54,7 @@ def extract_priors(dataset, args):
     os.makedirs(save_dir, exist_ok=True)
     print(f"Output directory: {save_dir}")
 
-    progress_bar = tqdm(train_cameras, desc="Extracting Priors (Tan-Ikeuchi)")
+    progress_bar = tqdm(train_cameras, desc="Extracting Priors")
 
     for cam in progress_bar:
         ref_image_name = cam.image_name
@@ -59,27 +63,28 @@ def extract_priors(dataset, args):
         img_tensor = cam.original_image.permute(1, 2, 0)
         img01 = img_tensor.cpu().numpy()
         
-        # Calculate Ref Score using Tan-Ikeuchi
-        final_score = tan_ikeuchi_score(img01, thresh=args.ti_thresh, bright_floor=args.ti_bright)
+        # Calculate Ref Score using Shafer/Klinker
+        final_score = shafer_klinker_score(img01, intensity_thresh=args.sk_intensity, sat_thresh=args.sk_saturation)
         
         # Convert to 8-bit image
         score_img = (final_score * 255).astype(np.uint8)
         
         # Save to disk
         save_path = os.path.join(save_dir, f"{ref_image_name}_ref_score.png")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         imageio.imwrite(save_path, score_img)
 
     end_time = time.time()
     print(f"Prior extraction complete in {end_time - start_time:.2f} seconds!")
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Extract Reflection Prior using Tan-Ikeuchi")
+    parser = ArgumentParser(description="Extract Reflection Prior using Shafer/Klinker")
     
     lp = ModelParams(parser)
     
-    # Add Tan-Ikeuchi specific parameters
-    parser.add_argument("--ti_thresh", type=float, default=0.35, help="Tan-Ikeuchi intensity threshold")
-    parser.add_argument("--ti_bright", type=float, default=0.6, help="Tan-Ikeuchi bright floor threshold")
+    # Add Shafer/Klinker specific parameters
+    parser.add_argument("--sk_intensity", type=float, default=0.7, help="Shafer/Klinker intensity threshold")
+    parser.add_argument("--sk_saturation", type=float, default=0.2, help="Shafer/Klinker saturation threshold")
 
     args = parser.parse_args()
 

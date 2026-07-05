@@ -111,6 +111,14 @@ class OptimizationParams(ParamGroup):
         self.specular_lr_max_steps = 30000
         self.specular_start_iter = 15000
         
+        # Specular/ASG Sparsity
+        self.lambda_spec_reg = 0.01
+        
+        # Shafer/Klinker Prior
+        self.sk_intensity = 0.7
+        self.sk_saturation = 0.2
+        self.disable_ref_score = False
+        
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

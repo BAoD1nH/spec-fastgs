@@ -158,7 +158,7 @@ def training(dataset, opt, pipe):
                     normal[vis_indices],
                 )  # [M, 3]
 
-                if hasattr(cam, 'ref_score'):
+                if hasattr(cam, 'ref_score') and not opt.disable_ref_score:
                     import torch.nn.functional as F_nn
                     xyz_vis = gaussians.get_xyz[vis_indices]
                     xyz_homo = torch.cat([xyz_vis, torch.ones_like(xyz_vis[..., :1])], dim=-1)
@@ -225,9 +225,9 @@ def training(dataset, opt, pipe):
             + opt.lambda_dssim * (1.0 - ssim_val)
         )
         
-        # Explicit Specular Suppression removed, reverting to v2.2 behavior
+        # L2 Sparsity Loss for ASG
         if spec_sparse is not None:
-            spec_reg = spec_sparse.pow(2).mean() * 0.0
+            spec_reg = spec_sparse.pow(2).mean() * opt.lambda_spec_reg
         else:
             spec_reg = 0.0
 
@@ -235,15 +235,9 @@ def training(dataset, opt, pipe):
 
         loss.backward()
 
-        # --- DYNAMIC SH DEGREE RESTRICTION (v6) ---
-        # Suppress gradients for higher-order SH (Bậc 1,2,3) in specular regions.
-        # This forces SH to behave as Degree 0 (diffuse only) in specular regions,
-        # leaving the view-dependent high-frequency highlight entirely for ASG.
-        with torch.no_grad():
-            if hasattr(cam, 'ref_score') and 'sampled_ref_score' in locals() and 'vis_indices' in locals():
-                if gaussians._features_rest.grad is not None:
-                    sh_rest_suppression = 1.0 - 0.99 * sampled_ref_score
-                    gaussians._features_rest.grad[vis_indices] *= sh_rest_suppression.unsqueeze(-1).unsqueeze(-1)
+        # --- NO SH DEGREE RESTRICTION ---
+        # Allow SH to train normally everywhere to form a smooth base color.
+        # ASG will naturally handle the specular highlights due to gradient boosting.
 
         # --------------------------------------------------------
         # OPTIMIZER STEP
