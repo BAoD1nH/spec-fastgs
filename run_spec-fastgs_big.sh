@@ -11,13 +11,18 @@ OUTPUT_ROOT=./output
 SCENE=counter
 IMAGES=images_8
 ASG_DEGREE=24
-USE_REF_SCORE=False
+USE_REF_SCORE=True
+EXTRACT_REF_PRIOR=True
+BACKUP_REF_PRIOR=True
 NUM_SCORE_CAMERAS=10
 FULL_ASG_INTERVAL=0
-F_REST_WARMUP_UNTIL=3000
+F_REST_WARMUP_UNTIL=0
 F_REST_INTERVAL_EARLY=16
 F_REST_INTERVAL_MID=32
 F_REST_INTERVAL_LATE=64
+REF_PRIOR_METHOD=tan
+TI_THRESH=0.35
+TI_BRIGHT=0.6
 SK_INTENSITY=0.7
 SK_SATURATION=0.2
 
@@ -27,15 +32,28 @@ if [ "$USE_REF_SCORE" = "True" ]; then
 fi
 
 # 0. EXTRACT REFLECTION PRIOR
-if [ "$USE_REF_SCORE" = "True" ]; then
+if [ "$USE_REF_SCORE" = "True" ] && [ "$EXTRACT_REF_PRIOR" = "True" ]; then
     echo "[0/4] Running extract_reflection_prior.py..."
+    PRIOR_DIR=${DATA_ROOT}/${SCENE}/reflection_prior
+    if [ "$BACKUP_REF_PRIOR" = "True" ] && [ -d "$PRIOR_DIR" ]; then
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        BACKUP_ROOT=${DATA_ROOT}/${SCENE}/backups
+        BACKUP_DIR=${BACKUP_ROOT}/reflection_prior_${TIMESTAMP}
+        echo "Backing up existing reflection_prior to:"
+        echo "  ${BACKUP_DIR}"
+        mkdir -p "$BACKUP_ROOT"
+        mv "$PRIOR_DIR" "$BACKUP_DIR"
+    fi
     python extract_reflection_prior.py \
         -s ${DATA_ROOT}/${SCENE} \
         -i ${IMAGES} \
+        --ref_prior_method ${REF_PRIOR_METHOD} \
+        --ti_thresh ${TI_THRESH} \
+        --ti_bright ${TI_BRIGHT} \
         --sk_intensity ${SK_INTENSITY} \
         --sk_saturation ${SK_SATURATION}
 else
-    echo "[0/4] Skipping extract_reflection_prior.py because USE_REF_SCORE=False"
+    echo "[0/4] Skipping extract_reflection_prior.py"
 fi
 
 # 1. TRAIN
@@ -61,6 +79,9 @@ python train.py \
     --f_rest_interval_early ${F_REST_INTERVAL_EARLY} \
     --f_rest_interval_mid ${F_REST_INTERVAL_MID} \
     --f_rest_interval_late ${F_REST_INTERVAL_LATE} \
+    --ref_prior_method ${REF_PRIOR_METHOD} \
+    --ti_thresh ${TI_THRESH} \
+    --ti_bright ${TI_BRIGHT} \
     --sk_intensity ${SK_INTENSITY} \
     --sk_saturation ${SK_SATURATION} \
     ${REF_SCORE_FLAG}
