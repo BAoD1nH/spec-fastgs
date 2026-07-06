@@ -269,6 +269,10 @@ class GaussianModel:
                                                      lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                      lr_delay_mult=training_args.position_lr_delay_mult,
                                                      max_steps=training_args.position_lr_max_steps)
+        self.f_rest_warmup_until = training_args.f_rest_warmup_until
+        self.f_rest_interval_early = training_args.f_rest_interval_early
+        self.f_rest_interval_mid = training_args.f_rest_interval_mid
+        self.f_rest_interval_late = training_args.f_rest_interval_late
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -284,29 +288,48 @@ class GaussianModel:
             self.asg_optimizer.step()
             self.asg_optimizer.zero_grad(set_to_none = True)
 
+        stepped_f_rest = False
         if iteration <= 15000:
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none = True)
-            if not skip_sh and iteration % 16 == 0:
-                if self.shoptimizer is not None:
-                    self.shoptimizer.step()
-                    self.shoptimizer.zero_grad(set_to_none = True)
+            if self._should_step_f_rest(iteration, skip_sh):
+                self._step_f_rest_optimizer()
+                stepped_f_rest = True
         elif iteration <= 20000:
             if iteration % 32 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
-                if not skip_sh:
-                    if self.shoptimizer is not None:
-                        self.shoptimizer.step()
-                        self.shoptimizer.zero_grad(set_to_none = True)
+                if self._should_step_f_rest(iteration, skip_sh):
+                    self._step_f_rest_optimizer()
+                    stepped_f_rest = True
         else:
             if iteration % 64 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
-                if not skip_sh:
-                    if self.shoptimizer is not None:
-                        self.shoptimizer.step()
-                        self.shoptimizer.zero_grad(set_to_none = True)
+                if self._should_step_f_rest(iteration, skip_sh):
+                    self._step_f_rest_optimizer()
+                    stepped_f_rest = True
+
+        if not stepped_f_rest and self._should_step_f_rest(iteration, skip_sh):
+            self._step_f_rest_optimizer()
+
+    def _should_step_f_rest(self, iteration, skip_sh=False):
+        if skip_sh or self.shoptimizer is None:
+            return False
+        if iteration <= self.f_rest_warmup_until:
+            return True
+        if iteration <= 15000:
+            interval = self.f_rest_interval_early
+        elif iteration <= 20000:
+            interval = self.f_rest_interval_mid
+        else:
+            interval = self.f_rest_interval_late
+        return interval > 0 and iteration % interval == 0
+
+    def _step_f_rest_optimizer(self):
+        if self.shoptimizer is not None:
+            self.shoptimizer.step()
+            self.shoptimizer.zero_grad(set_to_none=True)
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']

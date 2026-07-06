@@ -176,7 +176,7 @@ def render_sets(
         # LOAD MODELS
         # --------------------------------------------------------
 
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
 
@@ -264,4 +264,3 @@ if __name__ == "__main__":
         args.skip_test,
         args
     )
-

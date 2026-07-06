@@ -42,7 +42,7 @@ def training(dataset, opt, pipe):
     # INIT MODELS
     # ------------------------------------------------------------
 
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     initial_gaussians = gaussians.get_xyz.shape[0]
     gaussians.training_setup(opt)
@@ -62,13 +62,18 @@ def training(dataset, opt, pipe):
     # ------------------------------------------------------------
     import imageio
     ref_prior_dir = os.path.join(dataset.source_path, "reflection_prior")
-    if os.path.exists(ref_prior_dir):
+    if opt.use_ref_score and os.path.exists(ref_prior_dir):
         print("Loading Reflection Priors...")
+        loaded_ref_priors = 0
+        missing_ref_priors = 0
         for cam in scene.getTrainCameras():
             npath = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_score.png")
             if os.path.exists(npath):
                 try:
-                    ref_tensor = torch.tensor(imageio.imread(npath) / 255.0, dtype=torch.float32).cuda()
+                    ref_img = imageio.imread(npath)
+                    if len(ref_img.shape) == 3:
+                        ref_img = ref_img[..., 0]
+                    ref_tensor = torch.tensor(ref_img / 255.0, dtype=torch.float32).cuda()
                     if ref_tensor.shape[0] != cam.image_height or ref_tensor.shape[1] != cam.image_width:
                         ref_tensor = torch.nn.functional.interpolate(
                             ref_tensor.unsqueeze(0).unsqueeze(0),
@@ -77,8 +82,14 @@ def training(dataset, opt, pipe):
                             align_corners=False
                         ).squeeze()
                     cam.ref_score = ref_tensor
+                    loaded_ref_priors += 1
                 except Exception:
                     pass
+            else:
+                missing_ref_priors += 1
+        print(f"Loaded {loaded_ref_priors} reflection priors; missing {missing_ref_priors}.")
+    elif opt.use_ref_score:
+        print(f"Reflection prior enabled, but directory not found: {ref_prior_dir}")
 
     # ------------------------------------------------------------
     # TRAIN LOOP
@@ -90,10 +101,9 @@ def training(dataset, opt, pipe):
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training")
     ema_loss = 0.0
 
-    # ── Phase A: cached boolean visibility mask for sparse MLP evaluation ──
-    # Initialized to None; set each iteration from the rasterizer's radii output.
-    # After densification the Gaussian count changes, so we detect size mismatch
-    # and fall back to evaluating the full set for that single step.
+    # Cached boolean visibility mask for sparse ASG evaluation. This follows
+    # the original fast path: reuse the previous frame's mask and fall back to
+    # full ASG only when Gaussian count changes or an explicit refresh is due.
     prev_vis_mask: torch.Tensor | None = None
 
     for iteration in progress_bar:
@@ -128,9 +138,9 @@ def training(dataset, opt, pipe):
         normal = gaussians.get_normal_axis(viewdir)
 
         # --------------------------------------------------------
-        # SPECULAR (SG STYLE) — Phase A: sparse MLP via cached visibility
+        # SPECULAR (SG STYLE) — sparse MLP via previous-frame visibility
         # --------------------------------------------------------
-        # Only Gaussians visible in the PREVIOUS step feed the ASG MLP.
+        # Only Gaussians visible in the previous frame feed the ASG MLP.
         # Typically 10–30 % of Gaussians are on-screen per frame, so this
         # cuts MLP forward+backward cost by 3–10×.
         # After densification the count changes → we detect size mismatch
@@ -142,13 +152,17 @@ def training(dataset, opt, pipe):
 
         if iteration > opt.specular_start_iter:
             n_gs = gaussians.get_xyz.shape[0]
-            asg_feat = gaussians.get_asg_features  # [N, 24]
+            asg_feat = gaussians.get_asg_features  # [N, asg_degree]
+            force_full_asg = (
+                opt.full_asg_interval > 0 and
+                iteration % opt.full_asg_interval == 0
+            )
 
             # Determine which Gaussians to evaluate
-            if prev_vis_mask is not None and prev_vis_mask.shape[0] == n_gs:
+            if not force_full_asg and prev_vis_mask is not None and prev_vis_mask.shape[0] == n_gs:
                 vis_indices = prev_vis_mask.nonzero(as_tuple=False).squeeze(1)  # [M]
             else:
-                # First specular step OR count changed after densification
+                # First specular step, full refresh, or count changed after densification.
                 vis_indices = torch.arange(n_gs, device="cuda")
 
             if vis_indices.numel() > 0:
@@ -185,7 +199,6 @@ def training(dataset, opt, pipe):
 
         # ── Update cached visibility mask for the NEXT iteration ──────────
         # radii has shape [N]; (radii > 0) gives the boolean visibility mask.
-        # We store it here so the next step uses it without an extra render.
         prev_vis_mask = (radii > 0)  # [N] bool
 
         # --------------------------------------------------------
@@ -269,7 +282,7 @@ def training(dataset, opt, pipe):
                 iteration % opt.densification_interval == 0
             ):
                 size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                camlist = sampling_cameras(scene.getTrainCameras().copy())
+                camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
 
                 with torch.no_grad():
                     importance_score, pruning_score = compute_gaussian_score_fastgs(
@@ -291,7 +304,7 @@ def training(dataset, opt, pipe):
 
         # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
         if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
-            camlist = sampling_cameras(scene.getTrainCameras().copy())
+            camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
             with torch.no_grad():
                 _, pruning_score = compute_gaussian_score_fastgs(
                     camlist, gaussians, pipe, background, opt, False, iteration=iteration
@@ -327,6 +340,17 @@ def training(dataset, opt, pipe):
         "training_time_seconds": round(duration, 2),
         "training_time_formatted": f"{minutes}m {seconds}s",
         "peak_vram_mib": round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2),
+        "asg_degree": dataset.asg_degree,
+        "specular_start_iter": opt.specular_start_iter,
+        "full_asg_interval": opt.full_asg_interval,
+        "num_score_cameras": opt.num_score_cameras,
+        "use_ref_score": opt.use_ref_score,
+        "sk_intensity": opt.sk_intensity,
+        "sk_saturation": opt.sk_saturation,
+        "f_rest_warmup_until": opt.f_rest_warmup_until,
+        "f_rest_interval_early": opt.f_rest_interval_early,
+        "f_rest_interval_mid": opt.f_rest_interval_mid,
+        "f_rest_interval_late": opt.f_rest_interval_late,
         "datetime_completed": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -419,4 +443,3 @@ if __name__ == "__main__":
     )
 
     print("Training complete.")
-

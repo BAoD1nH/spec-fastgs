@@ -92,6 +92,7 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_interval = 3000
         self.densification_refscore_interval = 500
         self.max_refscore_gaussians = 400000
+        self.num_score_cameras = 10
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
@@ -110,6 +111,11 @@ class OptimizationParams(ParamGroup):
 
         self.specular_lr_max_steps = 30000
         self.specular_start_iter = 3000
+        self.full_asg_interval = 0
+        self.f_rest_warmup_until = 0
+        self.f_rest_interval_early = 16
+        self.f_rest_interval_mid = 32
+        self.f_rest_interval_late = 64
         
         # Specular/ASG Sparsity
         self.lambda_spec_reg = 0.01
@@ -117,6 +123,7 @@ class OptimizationParams(ParamGroup):
         # Shafer/Klinker Prior
         self.sk_intensity = 0.7
         self.sk_saturation = 0.2
+        self.use_ref_score = False
         self.disable_ref_score = False
         
         super().__init__(parser, "Optimization Parameters")
