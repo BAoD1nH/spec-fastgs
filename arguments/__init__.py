@@ -109,7 +109,7 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
 
         self.specular_lr_max_steps = 30000
-        self.specular_start_iter = 15000
+        self.specular_start_iter = 3000
         
         # Specular/ASG Sparsity
         self.lambda_spec_reg = 0.01

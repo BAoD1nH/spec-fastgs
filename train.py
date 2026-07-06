@@ -47,7 +47,7 @@ def training(dataset, opt, pipe):
     initial_gaussians = gaussians.get_xyz.shape[0]
     gaussians.training_setup(opt)
 
-    specular_mlp = SpecularModel(dataset.is_real, dataset.is_indoor)
+    specular_mlp = SpecularModel(dataset.asg_degree, dataset.is_real, dataset.is_indoor)
     specular_mlp.train_setting(opt)
 
     # ------------------------------------------------------------
@@ -155,26 +155,10 @@ def training(dataset, opt, pipe):
                 spec_sparse = specular_mlp.step(
                     asg_feat[vis_indices],
                     viewdir[vis_indices],
-                    normal[vis_indices],
+                    normal[vis_indices].detach(),
                 )  # [M, 3]
 
-                if hasattr(cam, 'ref_score') and not opt.disable_ref_score:
-                    import torch.nn.functional as F_nn
-                    xyz_vis = gaussians.get_xyz[vis_indices]
-                    xyz_homo = torch.cat([xyz_vis, torch.ones_like(xyz_vis[..., :1])], dim=-1)
-                    clip_space = xyz_homo @ cam.full_proj_transform
-                    ndc_space = clip_space[..., :2] / (clip_space[..., 3:4] + 1e-6)
-                    ndc_space[..., 1] *= -1  # Flip Y-axis to match PyTorch grid_sample top-to-bottom convention
-                    ref_score_tensor = cam.ref_score.unsqueeze(0).unsqueeze(0)
-                    ndc_grid = ndc_space.unsqueeze(0).unsqueeze(0)
-                    sampled_ref_score = F_nn.grid_sample(
-                        ref_score_tensor, ndc_grid, align_corners=False, padding_mode='border'
-                    ).view(-1)  # [M]
 
-                    # --- ASG GRADIENT BOOSTING ---
-                    # Boost gradients flowing into ASG by 10x in specular regions (Ref Score = 1)
-                    boost_mask = 1.0 + 9.0 * sampled_ref_score.unsqueeze(-1)
-                    spec_sparse.register_hook(lambda grad, bm=boost_mask: grad * bm)
 
                 # Scatter back into a full-scene buffer; index_put preserves grad
                 mlp_color = torch.zeros(
@@ -225,13 +209,7 @@ def training(dataset, opt, pipe):
             + opt.lambda_dssim * (1.0 - ssim_val)
         )
         
-        # L2 Sparsity Loss for ASG
-        if spec_sparse is not None:
-            spec_reg = spec_sparse.pow(2).mean() * opt.lambda_spec_reg
-        else:
-            spec_reg = 0.0
-
-        loss = photometric_loss + spec_reg
+        loss = photometric_loss
 
         loss.backward()
 
@@ -248,9 +226,8 @@ def training(dataset, opt, pipe):
         gaussians.optimizer_step(iteration, skip_sh=skip_sh)
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
-        if iteration > opt.specular_start_iter:
-            specular_mlp.update_learning_rate(iteration - opt.specular_start_iter)
-            specular_mlp.optimizer_step()
+        specular_mlp.update_learning_rate(iteration)
+        specular_mlp.optimizer_step()
 
         # --------------------------------------------------------
         # LOG
@@ -308,6 +285,18 @@ def training(dataset, opt, pipe):
                     importance_score=importance_score,
                     pruning_score=pruning_score
                 )
+
+            if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                gaussians.reset_opacity()
+
+        # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
+        if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
+            camlist = sampling_cameras(scene.getTrainCameras().copy())
+            with torch.no_grad():
+                _, pruning_score = compute_gaussian_score_fastgs(
+                    camlist, gaussians, pipe, background, opt, False, iteration=iteration
+                )
+            gaussians.final_prune_fastgs(min_opacity=0.1, pruning_score=pruning_score)
 
         # --------------------------------------------------------
         # SAVE

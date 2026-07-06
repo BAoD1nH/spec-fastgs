@@ -119,16 +119,16 @@ def render_set(
         )
 
         # 3) only_asg.png: Render(Full) - Render(SH)
-        spec_image = rendering - sh_image
+        spec_image = torch.clamp(rendering - sh_image, min=0.0)
         torchvision.utils.save_image(
-            spec_image.clamp(0.0, 1.0),
+            spec_image,
             os.path.join(spec_path, f"{idx:05d}_only_asg.png")
         )
 
-        # 4) residual_real.png: |GT - final|
-        residual_real = (gt - rendering).abs()
+        # 4) residual_real.png: clamp(GT - SH, min=0)
+        residual_real = torch.clamp(gt - sh_image, min=0.0)
         torchvision.utils.save_image(
-            residual_real.clamp(0.0, 1.0),
+            residual_real,
             os.path.join(spec_path, f"{idx:05d}_residual_real.png")
         )
 
@@ -192,7 +192,7 @@ def render_sets(
 
         print("ASG loaded with shape:", gaussians._features_asg.shape)
         
-        specular_mlp = SpecularModel(dataset.is_real, dataset.is_indoor)
+        specular_mlp = SpecularModel(dataset.asg_degree, dataset.is_real, dataset.is_indoor)
         specular_mlp.load_weights(dataset.model_path, iteration=scene.loaded_iter)
 
         # --------------------------------------------------------

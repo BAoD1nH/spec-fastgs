@@ -207,13 +207,11 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 
     # ---- point cloud ----
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
-
     if not os.path.exists(ply_path):
         try:
             xyz, rgb, _ = read_points3D_binary(os.path.join(path, "sparse/0/points3D.bin"))
         except:
             xyz, rgb, _ = read_points3D_text(os.path.join(path, "sparse/0/points3D.txt"))
-
         storePly(ply_path, xyz, rgb)
 
     pcd = fetchPly(ply_path)

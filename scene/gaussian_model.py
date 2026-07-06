@@ -78,6 +78,7 @@ class GaussianModel:
         # Ensure ASG features and optimizer states are always included for robust checkpointing
         opt_state = self.optimizer.state_dict() if self.optimizer is not None else None
         shopt_state = self.shoptimizer.state_dict() if getattr(self, 'shoptimizer', None) is not None else None
+        asgopt_state = self.asg_optimizer.state_dict() if getattr(self, 'asg_optimizer', None) is not None else None
 
         return (
             self.active_sh_degree,
@@ -95,24 +96,44 @@ class GaussianModel:
             opt_state,
             shopt_state,
             self.spatial_lr_scale,
+            asgopt_state,
         )
 
     def restore(self, model_args, training_args):
-        (self.active_sh_degree,
-         self._xyz,
-         self._features_dc,
-         self._features_rest,
-         self._features_asg,
-         self._scaling,
-         self._rotation,
-         self._opacity,
-         self.max_radii2D,
-         xyz_gradient_accum,
-         xyz_gradient_accum_abs,
-         denom,
-         opt_dict,
-         shopt_dict,
-         self.spatial_lr_scale) = model_args
+        asgopt_dict = None
+        if len(model_args) == 16:
+            (self.active_sh_degree,
+             self._xyz,
+             self._features_dc,
+             self._features_rest,
+             self._features_asg,
+             self._scaling,
+             self._rotation,
+             self._opacity,
+             self.max_radii2D,
+             xyz_gradient_accum,
+             xyz_gradient_accum_abs,
+             denom,
+             opt_dict,
+             shopt_dict,
+             self.spatial_lr_scale,
+             asgopt_dict) = model_args
+        else:
+            (self.active_sh_degree,
+             self._xyz,
+             self._features_dc,
+             self._features_rest,
+             self._features_asg,
+             self._scaling,
+             self._rotation,
+             self._opacity,
+             self.max_radii2D,
+             xyz_gradient_accum,
+             xyz_gradient_accum_abs,
+             denom,
+             opt_dict,
+             shopt_dict,
+             self.spatial_lr_scale) = model_args
 
         # Recreate optimizers / param groups with training_args then load states if present
         self.training_setup(training_args)
@@ -130,6 +151,12 @@ class GaussianModel:
         try:
             if shopt_dict is not None and getattr(self, 'shoptimizer', None) is not None:
                 self.shoptimizer.load_state_dict(shopt_dict)
+        except Exception:
+            pass
+
+        try:
+            if asgopt_dict is not None and getattr(self, 'asg_optimizer', None) is not None:
+                self.asg_optimizer.load_state_dict(asgopt_dict)
         except Exception:
             pass
 
@@ -222,22 +249,26 @@ class GaussianModel:
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.lowfeature_lr, "name": "f_dc"}, 
-            {'params': [self._features_asg], 'lr': training_args.feature_lr, "name": "f_asg"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
         sh_l = [{'params': [self._features_rest], 'lr': training_args.highfeature_lr / 20.0, "name": "f_rest"}]
+        asg_l = [{'params': [self._features_asg], 'lr': training_args.feature_lr, "name": "f_asg"}]
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
             self.shoptimizer = torch.optim.Adam(sh_l, lr=0.0, eps=1e-15)
+            self.asg_optimizer = torch.optim.Adam(asg_l, lr=0.0, eps=1e-15)
         elif self.optimizer_type == "sparse_adam":
             self.optimizer = SparseGaussianAdam(l + sh_l, lr=0.0, eps=1e-15)
+            self.shoptimizer = None
+            self.asg_optimizer = torch.optim.Adam(asg_l, lr=0.0, eps=1e-15)
+
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                     lr_delay_mult=training_args.position_lr_delay_mult,
+                                                     max_steps=training_args.position_lr_max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -248,27 +279,34 @@ class GaussianModel:
                 return lr
 
     def optimizer_step(self, iteration, skip_sh=False):
-        ''' An optimization schdeuler. The goal is similar to the sparse Adam of taming 3dgs.'''
+        ''' An optimization scheduler. The goal is similar to the sparse Adam of taming 3dgs.'''
+        if getattr(self, 'asg_optimizer', None) is not None:
+            self.asg_optimizer.step()
+            self.asg_optimizer.zero_grad(set_to_none = True)
+
         if iteration <= 15000:
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none = True)
             if not skip_sh and iteration % 16 == 0:
-                self.shoptimizer.step()
-                self.shoptimizer.zero_grad(set_to_none = True)
+                if self.shoptimizer is not None:
+                    self.shoptimizer.step()
+                    self.shoptimizer.zero_grad(set_to_none = True)
         elif iteration <= 20000:
             if iteration % 32 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
                 if not skip_sh:
-                    self.shoptimizer.step()
-                    self.shoptimizer.zero_grad(set_to_none = True)
+                    if self.shoptimizer is not None:
+                        self.shoptimizer.step()
+                        self.shoptimizer.zero_grad(set_to_none = True)
         else:
             if iteration % 64 == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none = True)
                 if not skip_sh:
-                    self.shoptimizer.step()
-                    self.shoptimizer.zero_grad(set_to_none = True)
+                    if self.shoptimizer is not None:
+                        self.shoptimizer.step()
+                        self.shoptimizer.zero_grad(set_to_none = True)
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
@@ -369,7 +407,8 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         optimizers = [self.optimizer]
-        if self.shoptimizer: optimizers.append(self.shoptimizer)
+        if getattr(self, 'shoptimizer', None): optimizers.append(self.shoptimizer)
+        if getattr(self, 'asg_optimizer', None): optimizers.append(self.asg_optimizer)
 
         for opt in optimizers:
             for group in opt.param_groups:
@@ -411,7 +450,8 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         optimizers = [self.optimizer]
-        if self.shoptimizer: optimizers.append(self.shoptimizer)
+        if getattr(self, 'shoptimizer', None): optimizers.append(self.shoptimizer)
+        if getattr(self, 'asg_optimizer', None): optimizers.append(self.asg_optimizer)
 
         for opt in optimizers:
             for group in opt.param_groups:
