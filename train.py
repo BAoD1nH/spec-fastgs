@@ -29,6 +29,72 @@ except:
     TENSORBOARD_FOUND = False
 
 
+def configure_refscore_budget(opt, initial_gaussians):
+    if not getattr(opt, 'use_ref_score', False):
+        return
+
+    if getattr(opt, 'max_refscore_gaussians', 400000) == -1:
+        budget = int(initial_gaussians * opt.refscore_budget_multiplier)
+        budget = max(budget, opt.refscore_budget_min)
+        budget = min(budget, opt.refscore_budget_max)
+        opt.max_refscore_gaussians = budget
+        print(
+            f"[Auto Budget] Ref Score cap: {budget:,} Gaussians "
+            f"(initial={initial_gaussians:,}, multiplier={opt.refscore_budget_multiplier})"
+        )
+    else:
+        print(f"[Ref Score Budget] cap: {opt.max_refscore_gaussians:,} Gaussians")
+
+
+def update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration):
+    if not getattr(opt, 'use_ref_score', False) or not getattr(opt, 'use_adaptive_prior', False):
+        return 0
+    if iteration < opt.adaptive_prior_start:
+        return 0
+    if iteration % opt.adaptive_prior_interval != 0:
+        return 0
+
+    train_cams = scene.getTrainCameras().copy()
+    num_cameras = getattr(opt, 'adaptive_prior_num_cameras', 20)
+    if num_cameras > 0 and num_cameras < len(train_cams):
+        train_cams = sampling_cameras(train_cams, num_cameras)
+
+    updated = 0
+    with torch.no_grad():
+        for cam in train_cams:
+            if not hasattr(cam, 'ref_score_static'):
+                continue
+
+            # Render base/SH only, matching compute_gaussian_score_fastgs().
+            # This residual marks regions not yet explained by the base model.
+            render_img = render_fastgs(
+                cam,
+                gaussians,
+                pipe,
+                background,
+                opt.mult,
+                mlp_color=None
+            )["render"]
+
+            gt = cam.original_image.cuda()
+            residual = torch.abs(render_img - gt).mean(dim=0)
+            robust_max = torch.quantile(residual.flatten(), 0.95)
+            residual_norm = (residual / (robust_max + 1e-6)).clamp(0.0, 1.0)
+
+            adaptive = residual_norm * cam.ref_score_static
+            adaptive_max = adaptive.max()
+            if adaptive_max > 0:
+                adaptive = adaptive / (adaptive_max + 1e-6)
+
+            alpha = opt.adaptive_prior_ema
+            cam.ref_score = (alpha * cam.ref_score + (1.0 - alpha) * adaptive).detach()
+            updated += 1
+
+    if updated:
+        print(f"[Adaptive Prior] iter {iteration}: updated {updated} camera ref_score maps")
+    return updated
+
+
 # ============================================================
 # TRAINING LOOP
 # ============================================================
@@ -45,6 +111,7 @@ def training(dataset, opt, pipe):
     gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     initial_gaussians = gaussians.get_xyz.shape[0]
+    configure_refscore_budget(opt, initial_gaussians)
     gaussians.training_setup(opt)
 
     specular_mlp = SpecularModel(dataset.asg_degree, dataset.is_real, dataset.is_indoor)
@@ -82,6 +149,7 @@ def training(dataset, opt, pipe):
                             align_corners=False
                         ).squeeze()
                     cam.ref_score = ref_tensor
+                    cam.ref_score_static = ref_tensor.clone()
                     loaded_ref_priors += 1
                 except Exception:
                     pass
@@ -251,6 +319,8 @@ def training(dataset, opt, pipe):
         if iteration % 10 == 0:
             progress_bar.set_postfix({"loss": f"{ema_loss:.6f}"})
 
+        update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration)
+
         # --------------------------------------------------------
         # DENSIFY (FASTGS)
         # --------------------------------------------------------
@@ -345,6 +415,19 @@ def training(dataset, opt, pipe):
         "full_asg_interval": opt.full_asg_interval,
         "num_score_cameras": opt.num_score_cameras,
         "use_ref_score": opt.use_ref_score,
+        "max_refscore_gaussians": opt.max_refscore_gaussians,
+        "refscore_budget_multiplier": opt.refscore_budget_multiplier,
+        "refscore_budget_min": opt.refscore_budget_min,
+        "refscore_budget_max": opt.refscore_budget_max,
+        "refscore_decay_power": opt.refscore_decay_power,
+        "refscore_min_strength": opt.refscore_min_strength,
+        "refscore_threshold_min": opt.refscore_threshold_min,
+        "refscore_threshold_max": opt.refscore_threshold_max,
+        "use_adaptive_prior": opt.use_adaptive_prior,
+        "adaptive_prior_start": opt.adaptive_prior_start,
+        "adaptive_prior_interval": opt.adaptive_prior_interval,
+        "adaptive_prior_num_cameras": opt.adaptive_prior_num_cameras,
+        "adaptive_prior_ema": opt.adaptive_prior_ema,
         "ref_prior_method": opt.ref_prior_method,
         "ti_thresh": opt.ti_thresh,
         "ti_bright": opt.ti_bright,

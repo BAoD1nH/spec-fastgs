@@ -20,15 +20,16 @@ IMAGES=images_8
 # Prior method:
 #   tan    = Tan-Ikeuchi-style prior, older spec-fastgs behavior
 #   shafer = Shafer/Klinker-style prior
-REF_PRIOR_METHOD=shafer
+# REF_PRIOR_METHOD=shafer
+REF_PRIOR_METHOD=tan
 
 # Tan-Ikeuchi parameters
 TI_THRESH=0.35
 TI_BRIGHT=0.6
 
 # Shafer/Klinker parameters
-SK_INTENSITY=0.65
-SK_SATURATION=0.3
+SK_INTENSITY=0.7
+SK_SATURATION=0.2
 
 # Backup existing reflection_prior before overwrite.
 # Set to False if you intentionally want direct overwrite.

@@ -91,7 +91,14 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densification_refscore_interval = 500
-        self.max_refscore_gaussians = 400000
+        self.max_refscore_gaussians = -1
+        self.refscore_budget_multiplier = 10.0
+        self.refscore_budget_min = 200000
+        self.refscore_budget_max = 1000000
+        self.refscore_decay_power = 1.0
+        self.refscore_min_strength = 0.15
+        self.refscore_threshold_min = 0.5
+        self.refscore_threshold_max = 0.9
         self.num_score_cameras = 10
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
@@ -128,6 +135,11 @@ class OptimizationParams(ParamGroup):
         self.sk_saturation = 0.2
         self.use_ref_score = False
         self.disable_ref_score = False
+        self.use_adaptive_prior = False
+        self.adaptive_prior_start = 5000
+        self.adaptive_prior_interval = 3000
+        self.adaptive_prior_num_cameras = 20
+        self.adaptive_prior_ema = 0.7
         
         super().__init__(parser, "Optimization Parameters")
 
