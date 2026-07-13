@@ -1,7 +1,8 @@
 # ============================================================
 # Renderer (Spec-Gaussian + FastGS)
 # ============================================================
-
+#Nhận Gaussian + camera + màu SH/specular đã chuẩn bị, rồi gọi FastGS rasterizer 
+# để sinh ảnh và các tín hiệu phụ phục vụ training/densification.
 import torch
 import math
 
@@ -15,15 +16,15 @@ from diff_gaussian_rasterization_fastgs import (
 
 
 def render_fastgs(
-    viewpoint_camera,
-    pc: GaussianModel,
+    viewpoint_camera, #Camera hiện tại, chứa FoV, transform, kích thước ảnh.
+    pc: GaussianModel, #Gaussian model, chứa vị trí, opacity, scale, rotation, SH feature, ASG feature.
     pipe,
     bg_color: torch.Tensor,
-    mult,
+    mult, #tham số FastGS cho compact box/tile coverage
     mlp_color=None,                 	# ✅ SPECULAR từ ngoài truyền vào
-    scaling_modifier=1.0,
-    override_color=None,
-    get_flag=False,
+    scaling_modifier=1.0, 
+    override_color=None, #nếu muốn bỏ qua SH color và ép màu khác, ví dụ debug depth.
+    get_flag=False, #dùng cho FastGS metric accumulation/densification.
     metric_map=None
 ):
     """
@@ -34,8 +35,9 @@ def render_fastgs(
     """
 
     # ------------------------------------------------------------
-    # SCREENSPACE POINTS
+    # SCREENSPACE POINTS: 
     # ------------------------------------------------------------
+    #gradient screen-space rất quan trọng để biết Gaussian nào cần densify.
 
     screenspace_points = torch.zeros(
         (pc.get_xyz.shape[0], 4),
@@ -48,7 +50,7 @@ def render_fastgs(
     # ------------------------------------------------------------
     # CAMERA SETUP
     # ------------------------------------------------------------
-
+    #Lấy thông tin camera
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
@@ -58,6 +60,8 @@ def render_fastgs(
     if metric_map is None:
         metric_map = torch.zeros(H * W, dtype=torch.int, device="cuda")
 
+    #onfig cho CUDA rasterizer: kích thước ảnh, matrix camera, 
+    # FoV, background, SH degree, camera center, mult, debug, metric_map.
     raster_settings = GaussianRasterizationSettings(
         image_height=H,
         image_width=W,
