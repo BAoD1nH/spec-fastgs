@@ -18,6 +18,7 @@ from scene import Scene, GaussianModel, SpecularModel
 
 from utils.general_utils import safe_state
 from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
+from utils.gaussian_heatmap import save_gaussian_view_heatmaps
 
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
@@ -522,6 +523,16 @@ def training(dataset, opt, pipe):
     avg_asg_eval_count = asg_eval_count_total / asg_eval_steps if asg_eval_steps > 0 else 0.0
     avg_sh_spec_mask_ratio = sh_spec_mask_ratio_total / sh_spec_mask_steps if sh_spec_mask_steps > 0 else 0.0
     avg_spec_reg_loss = spec_reg_loss_total / spec_reg_steps if spec_reg_steps > 0 else 0.0
+    heatmap_path = save_gaussian_view_heatmaps(
+        scene.getTestCameras(),
+        gaussians,
+        scene.model_path,
+        opt.iterations,
+        render_fastgs,
+        (pipe, background, opt.mult),
+    )
+    if heatmap_path:
+        print(f"Saved Gaussian distribution heatmaps to {heatmap_path}")
     metadata = {
         "scene": dataset.source_path.split("/")[-1],
         "git_branch": get_git_branch(),
@@ -529,6 +540,7 @@ def training(dataset, opt, pipe):
         "iterations": opt.iterations,
         "initial_gaussians": initial_gaussians,
         "final_gaussians": gaussians.get_xyz.shape[0],
+        "gaussian_heatmap_dir": os.path.relpath(heatmap_path, dataset.model_path) if heatmap_path else None,
         "training_time_seconds": round(duration, 2),
         "training_time_formatted": f"{minutes}m {seconds}s",
         "peak_vram_mib": round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2),

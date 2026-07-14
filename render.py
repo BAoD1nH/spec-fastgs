@@ -13,6 +13,7 @@ from scene import Scene, GaussianModel, SpecularModel
 from gaussian_renderer import render_fastgs
 
 from utils.general_utils import safe_state
+from utils.gaussian_heatmap import save_gaussian_view_heatmaps
 
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
@@ -188,28 +189,30 @@ def render_sets(
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
 
-        # ✅ LOAD ASG FEATURE
-        asg_path = os.path.join(
-            dataset.model_path,
-            f"point_cloud/iteration_{scene.loaded_iter}/asg.pt"
-        )
+        specular_mlp = None
+        if not args.only_heatmap:
+            # ✅ LOAD ASG FEATURE
+            asg_path = os.path.join(
+                dataset.model_path,
+                f"point_cloud/iteration_{scene.loaded_iter}/asg.pt"
+            )
 
-        print("Loading ASG from:", asg_path)
+            print("Loading ASG from:", asg_path)
 
-        gaussians._features_asg = torch.load(asg_path).cuda()
+            gaussians._features_asg = torch.load(asg_path).cuda()
 
-        print("ASG loaded with shape:", gaussians._features_asg.shape)
+            print("ASG loaded with shape:", gaussians._features_asg.shape)
 
-        specular_mlp = SpecularModel(
-            dataset.asg_degree,
-            dataset.is_real,
-            dataset.is_indoor,
-            getattr(dataset, "asg_num_theta", -1),
-            getattr(dataset, "asg_num_phi", -1),
-            getattr(dataset, "specular_hidden", -1),
-            getattr(dataset, "specular_layers", -1),
-        )
-        specular_mlp.load_weights(dataset.model_path, iteration=scene.loaded_iter)
+            specular_mlp = SpecularModel(
+                dataset.asg_degree,
+                dataset.is_real,
+                dataset.is_indoor,
+                getattr(dataset, "asg_num_theta", -1),
+                getattr(dataset, "asg_num_phi", -1),
+                getattr(dataset, "specular_hidden", -1),
+                getattr(dataset, "specular_layers", -1),
+            )
+            specular_mlp.load_weights(dataset.model_path, iteration=scene.loaded_iter)
 
         # --------------------------------------------------------
         # BACKGROUND
@@ -222,7 +225,7 @@ def render_sets(
         # RENDER TRAIN / TEST
         # --------------------------------------------------------
 
-        if not skip_train:
+        if not skip_train and not args.only_heatmap:
             render_set(
                 dataset.model_path,
                 "train",
@@ -235,18 +238,28 @@ def render_sets(
                 args
             )
 
-        if not skip_test:
-            render_set(
-                dataset.model_path,
-                "test",
-                scene.loaded_iter,
+        if args.only_heatmap or not skip_test:
+            if not args.only_heatmap:
+                render_set(
+                    dataset.model_path,
+                    "test",
+                    scene.loaded_iter,
+                    scene.getTestCameras(),
+                    gaussians,
+                    pipeline,
+                    background,
+                    specular_mlp,
+                    args
+                )
+            heatmap_path = save_gaussian_view_heatmaps(
                 scene.getTestCameras(),
                 gaussians,
-                pipeline,
-                background,
-                specular_mlp,
-                args
+                scene.model_path,
+                scene.loaded_iter,
+                render_fastgs,
+                (pipeline, background, args.mult),
             )
+            print(f"Saved Gaussian distribution heatmaps to {heatmap_path}")
 
 
 # ------------------------------------------------------------
@@ -263,6 +276,7 @@ if __name__ == "__main__":
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--only_heatmap", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mult", type=float, default=0.5)
 
