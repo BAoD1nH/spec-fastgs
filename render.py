@@ -1,26 +1,27 @@
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
+# ============================================================
+# Rendering Script (Spec-Gaussian + FastGS)
+# ============================================================
 
 import torch
-from scene import Scene
 import os
+import time
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render_fastgs
 import torchvision
+
+from scene import Scene, GaussianModel, SpecularModel
+from gaussian_renderer import render_fastgs
+
 from utils.general_utils import safe_state
+from utils.gaussian_heatmap import save_gaussian_view_heatmaps
+
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
-import time
 
+
+# ------------------------------------------------------------
+# RENDER ONE SET (TRAIN / TEST)
+# ------------------------------------------------------------
 
 def render_set(
     model_path,
@@ -30,18 +31,61 @@ def render_set(
     gaussians,
     pipeline,
     background,
-    args,
-    specular_model=None   # <<< THÊM
+    specular_mlp,
+    args
 ):
+
     render_path = os.path.join(model_path, name, f"ours_{iteration}", "renders")
     gts_path = os.path.join(model_path, name, f"ours_{iteration}", "gt")
-
-    total_time = 0.0
+    spec_path = os.path.join(model_path, name, f"ours_{iteration}", "spec")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+    makedirs(spec_path, exist_ok=True)
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+    total_time = 0.0
+
+    for idx, view in enumerate(tqdm(views, desc=f"{name} rendering")):
+
+        # --------------------------------------------------------
+        # COMPUTE VIEWDIR + NORMAL
+        # --------------------------------------------------------
+
+        xyz = gaussians.get_xyz
+        cam_center = view.camera_center.to("cuda")  
+
+        viewdir = xyz - cam_center
+        viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+
+        normal = gaussians.get_normal_axis(viewdir).to("cuda")
+
+        # --------------------------------------------------------
+        # SPECULAR
+        # --------------------------------------------------------
+
+        mlp_color = specular_mlp.step(
+            gaussians.get_asg_features.to("cuda"),
+            viewdir,
+            normal
+        )
+
+        # --------------------------------------------------------
+        # DEBUG VISUALIZATIONS (SH-only, specular diagnostics)
+        # --------------------------------------------------------
+        # Minimal extra renders: compute SH-only image and full image
+
+        # SH-only render (no specular)
+        sh_pkg = render_fastgs(
+            view,
+            gaussians,
+            pipeline,
+            background,
+            args.mult,
+            mlp_color=None
+        )
+        sh_image = sh_pkg["render"]
+
+        # Full render (SH + specular)
         start_time = time.time()
 
         render_pkg = render_fastgs(
@@ -50,35 +94,81 @@ def render_set(
             pipeline,
             background,
             args.mult,
-            specular_model=specular_model,
-            get_flag=True
+            mlp_color=mlp_color
         )
-
-        rendering = render_pkg["render"]
 
         end_time = time.time()
         total_time += (end_time - start_time)
 
+        rendering = render_pkg["render"]
         gt = view.original_image[0:3, :, :]
+
+        # --------------------------------------------------------
+        # SAVE DIAGNOSTIC RENDERS (Academic Standard - No Scaling)
+        # --------------------------------------------------------
+
+        # 1) final.png: Render(SH + ASG)
+        torchvision.utils.save_image(
+            rendering.clamp(0.0, 1.0),
+            os.path.join(spec_path, f"{idx:05d}_final.png")
+        )
+
+        # 2) only_sh.png: Render(SH)
+        torchvision.utils.save_image(
+            sh_image.clamp(0.0, 1.0),
+            os.path.join(spec_path, f"{idx:05d}_only_sh.png")
+        )
+
+        # 3) only_asg.png: Render(Full) - Render(SH)
+        spec_image = torch.clamp(rendering - sh_image, min=0.0)
+        torchvision.utils.save_image(
+            spec_image,
+            os.path.join(spec_path, f"{idx:05d}_only_asg.png")
+        )
+
+        # 4) residual_real.png: clamp(GT - SH, min=0)
+        residual_real = torch.clamp(gt - sh_image, min=0.0)
+        torchvision.utils.save_image(
+            residual_real,
+            os.path.join(spec_path, f"{idx:05d}_residual_real.png")
+        )
+
+        # 5) residual_remaining.png: clamp(GT - Final, min=0)
+        # This shows what is still missing after SH + ASG have both contributed.
+        residual_remaining = torch.clamp(gt - rendering, min=0.0)
+        torchvision.utils.save_image(
+            residual_remaining,
+            os.path.join(spec_path, f"{idx:05d}_residual_remaining.png")
+        )
+
+        # --------------------------------------------------------
+        # SAVE RENDERS (original behavior)
+        # --------------------------------------------------------
 
         torchvision.utils.save_image(
             rendering,
             os.path.join(render_path, f"{idx:05d}.png")
         )
+
         torchvision.utils.save_image(
             gt,
             os.path.join(gts_path, f"{idx:05d}.png")
         )
 
+        # --------------------------------------------------------
+        # end frame loop
+        # --------------------------------------------------------
+
     num_frames = len(views)
     avg_time = total_time / num_frames if num_frames > 0 else 0.0
     fps = 1.0 / avg_time if avg_time > 0 else 0.0
 
-    print(
-        f"[{name}] Rendered {num_frames} frames in {total_time:.2f}s. "
-        f"Average FPS: {fps:.2f}"
-    )
+    print(f"[{name}] {num_frames} frames | FPS: {fps:.2f}")
 
+
+# ------------------------------------------------------------
+# MAIN RENDER FUNCTION
+# ------------------------------------------------------------
 
 def render_sets(
     dataset: ModelParams,
@@ -88,37 +178,54 @@ def render_sets(
     skip_test: bool,
     args
 ):
+
     with torch.no_grad():
-        # === Load Gaussian Model (FastGS) ===
-        gaussians = GaussianModel(dataset.sh_degree, optimizer_type="default")
+
+        # --------------------------------------------------------
+        # LOAD MODELS
+        # --------------------------------------------------------
+
+        gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
-        # === Background ===
+
+        specular_mlp = None
+        if not args.only_heatmap:
+            # ✅ LOAD ASG FEATURE
+            asg_path = os.path.join(
+                dataset.model_path,
+                f"point_cloud/iteration_{scene.loaded_iter}/asg.pt"
+            )
+
+            print("Loading ASG from:", asg_path)
+
+            gaussians._features_asg = torch.load(asg_path).cuda()
+
+            print("ASG loaded with shape:", gaussians._features_asg.shape)
+
+            specular_mlp = SpecularModel(
+                dataset.asg_degree,
+                dataset.is_real,
+                dataset.is_indoor,
+                getattr(dataset, "asg_num_theta", -1),
+                getattr(dataset, "asg_num_phi", -1),
+                getattr(dataset, "specular_hidden", -1),
+                getattr(dataset, "specular_layers", -1),
+            )
+            specular_mlp.load_weights(dataset.model_path, iteration=scene.loaded_iter)
+
+        # --------------------------------------------------------
+        # BACKGROUND
+        # --------------------------------------------------------
+
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        # === OPTIONAL: Load specular model ===
-        specular_model = None
-        if args.use_specular:
-            from specular import SpecularModel
+        # --------------------------------------------------------
+        # RENDER TRAIN / TEST
+        # --------------------------------------------------------
 
-            specular_model = SpecularModel().cuda()
-            specular_ckpt = os.path.join(
-                dataset.model_path, "specular", "specular.pth"
-            )
-
-            if not os.path.exists(specular_ckpt):
-                raise FileNotFoundError(
-                    f"[Spec-FastGS] Specular checkpoint not found: {specular_ckpt}"
-                )
-
-            specular_model.load_state_dict(torch.load(specular_ckpt))
-            specular_model.eval()
-
-            print("[Spec-FastGS] Specular model loaded.")
-
-        # === Render train / test sets ===
-        if not skip_train:
+        if not skip_train and not args.only_heatmap:
             render_set(
                 dataset.model_path,
                 "train",
@@ -127,27 +234,41 @@ def render_sets(
                 gaussians,
                 pipeline,
                 background,
-                args,
-                specular_model
+                specular_mlp,
+                args
             )
 
-        if not skip_test:
-            render_set(
-                dataset.model_path,
-                "test",
-                scene.loaded_iter,
+        if args.only_heatmap or not skip_test:
+            if not args.only_heatmap:
+                render_set(
+                    dataset.model_path,
+                    "test",
+                    scene.loaded_iter,
+                    scene.getTestCameras(),
+                    gaussians,
+                    pipeline,
+                    background,
+                    specular_mlp,
+                    args
+                )
+            heatmap_path = save_gaussian_view_heatmaps(
                 scene.getTestCameras(),
                 gaussians,
-                pipeline,
-                background,
-                args,
-                specular_model
+                scene.model_path,
+                scene.loaded_iter,
+                render_fastgs,
+                (pipeline, background, args.mult),
             )
+            print(f"Saved Gaussian distribution heatmaps to {heatmap_path}")
 
+
+# ------------------------------------------------------------
+# ENTRY POINT
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
 
-    parser = ArgumentParser(description="Rendering script (FastGS / Spec-FastGS)")
+    parser = ArgumentParser(description="Rendering Spec-FastGS")
 
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
@@ -155,28 +276,14 @@ if __name__ == "__main__":
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--only_heatmap", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mult", type=float, default=0.5)
-
-    # <<< THÊM FLAG SPECULAR >>>
-    parser.add_argument(
-        "--use_specular",
-        action="store_true",
-        help="Enable Specular-FastGS rendering"
-    )
-
-
-    parser.add_argument(
-        "--debug_specular_mask",
-        action="store_true",
-        help="Visualize specular Gaussians"
-    )
 
     args = get_combined_args(parser)
 
     print("Rendering " + args.model_path)
 
-    # Initialize system state (RNG)
     safe_state(args.quiet)
 
     render_sets(

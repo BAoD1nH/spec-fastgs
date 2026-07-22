@@ -1,32 +1,43 @@
+# ============================================================
+# Renderer (Spec-Gaussian + FastGS)
+# ============================================================
+#Nhận Gaussian + camera + màu SH/specular đã chuẩn bị, rồi gọi FastGS rasterizer 
+# để sinh ảnh và các tín hiệu phụ phục vụ training/densification.
 import torch
 import math
 
-
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
+
 from diff_gaussian_rasterization_fastgs import (
     GaussianRasterizationSettings,
     GaussianRasterizer
 )
-from specular.normal_utils import compute_gaussian_normals
-
-
 
 
 def render_fastgs(
-        viewpoint_camera,
-        pc: GaussianModel,
-        pipe,
-        bg_color: torch.Tensor,
-        mult,
-        scaling_modifier=1.0,
-        override_color=None,
-        get_flag=False,
-        metric_map=None,
-        specular_model=None,
-        specular_mask=None,
-        debug_specular_mask=False
-    ):
+    viewpoint_camera, #Camera hiện tại, chứa FoV, transform, kích thước ảnh.
+    pc: GaussianModel, #Gaussian model, chứa vị trí, opacity, scale, rotation, SH feature, ASG feature.
+    pipe,
+    bg_color: torch.Tensor,
+    mult, #tham số FastGS cho compact box/tile coverage
+    mlp_color=None,                 	# ✅ SPECULAR từ ngoài truyền vào
+    scaling_modifier=1.0, 
+    override_color=None, #nếu muốn bỏ qua SH color và ép màu khác, ví dụ debug depth.
+    get_flag=False, #dùng cho FastGS metric accumulation/densification.
+    metric_map=None
+):
+    """
+    FastGS renderer with Spec-Gaussian design
+
+    ✅ Specular handled outside
+    ✅ Renderer only composes color (SH + mlp_color)
+    """
+
+    # ------------------------------------------------------------
+    # SCREENSPACE POINTS: 
+    # ------------------------------------------------------------
+    #gradient screen-space rất quan trọng để biết Gaussian nào cần densify.
 
     screenspace_points = torch.zeros(
         (pc.get_xyz.shape[0], 4),
@@ -36,20 +47,21 @@ def render_fastgs(
     )
     screenspace_points.retain_grad()
 
-
+    # ------------------------------------------------------------
+    # CAMERA SETUP
+    # ------------------------------------------------------------
+    #Lấy thông tin camera
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-
 
     H = int(viewpoint_camera.image_height)
     W = int(viewpoint_camera.image_width)
 
-
-    # ✅ FIX QUAN TRỌNG
     if metric_map is None:
-        metric_map = torch.zeros((H, W), dtype=torch.int32, device="cuda")
+        metric_map = torch.zeros(H * W, dtype=torch.int, device="cuda")
 
-
+    #onfig cho CUDA rasterizer: kích thước ảnh, matrix camera, 
+    # FoV, background, SH degree, camera center, mult, debug, metric_map.
     raster_settings = GaussianRasterizationSettings(
         image_height=H,
         image_width=W,
@@ -68,13 +80,14 @@ def render_fastgs(
         metric_map=metric_map
     )
 
-
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
+    # ------------------------------------------------------------
+    # GAUSSIAN ATTR
+    # ------------------------------------------------------------
 
     means3D = pc.get_xyz
     opacity = pc.get_opacity
-
 
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
@@ -85,50 +98,38 @@ def render_fastgs(
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-
-    # SH
-    shs = None
-    colors_precomp = None
-
+    # ------------------------------------------------------------
+    # SH COLOR (DIFFUSE)
+    # ------------------------------------------------------------
 
     if override_color is None:
+
         shs_view = pc.get_features.transpose(1, 2).view(
             -1, 3, (pc.max_sh_degree + 1) ** 2
         )
 
-
-        viewdir = means3D - viewpoint_camera.camera_center[None, :]
+        viewdir = means3D - viewpoint_camera.camera_center
         viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
 
-        viewdir_for_sh = viewdir.detach()   # BLock gradient
-
-        colors_precomp = torch.clamp_min(
-            eval_sh(pc.active_sh_degree, shs_view, viewdir_for_sh) + 0.5,
+        sh_color = torch.clamp_min(
+            eval_sh(pc.active_sh_degree, shs_view, viewdir) + 0.5,
             0.0
         )
     else:
-        colors_precomp = override_color
+        sh_color = override_color
 
+    # ------------------------------------------------------------
+    # FINAL COLOR = SH + SPECULAR (SG STYLE)
+    # ------------------------------------------------------------
 
-    # ✅ SPECULAR
-    if specular_model is not None:
-        viewdir = means3D - viewpoint_camera.camera_center[None, :]
-        viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+    if mlp_color is not None:
+        colors_precomp = sh_color + mlp_color
+    else:
+        colors_precomp = sh_color
 
-
-        normal = compute_gaussian_normals(pc)
-        feat = pc.get_features_specular
-
-
-        specular_color = specular_model(feat, viewdir, normal)
-
-
-        if specular_mask is not None:
-            specular_color[~specular_mask] = 0.0
-
-
-        colors_precomp = colors_precomp + 1 * specular_color
-
+    # ------------------------------------------------------------
+    # RASTERIZATION
+    # ------------------------------------------------------------
 
     rendered_image, radii, accum_metric_counts = rasterizer(
         means3D=means3D,
@@ -142,13 +143,10 @@ def render_fastgs(
         cov3D_precomp=cov3D_precomp
     )
 
-
     return {
         "render": rendered_image,
-        "gaussian_index_map": metric_map,
         "viewspace_points": screenspace_points,
         "visibility_filter": (radii > 0).nonzero(),
         "radii": radii,
         "accum_metric_counts": accum_metric_counts,
-        "specular": specular_color if specular_model is not None else None,
     }

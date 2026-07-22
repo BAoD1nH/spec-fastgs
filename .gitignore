@@ -31,3 +31,16 @@ __pycache__/
 
 /submodules/
 /output_spec_fastgs/
+Specular-Gaussians/
+
+*.tex
+*.aux
+*.log
+*.out
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.zip
+*.ply
+*.bib

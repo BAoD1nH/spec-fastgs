@@ -7,11 +7,11 @@ import torchvision.transforms as transforms
 import random
 
 
-def sampling_cameras(my_viewpoint_stack):
+def sampling_cameras(my_viewpoint_stack, num_cams=10):
     ''' Randomly sample a given number of cameras from the viewpoint stack'''
 
-    num_cams = 10
     camlist = []
+    num_cams = min(num_cams, len(my_viewpoint_stack))
     for _ in range(num_cams):
         loc = random.randint(0, len(my_viewpoint_stack) - 1)
         camlist.append(my_viewpoint_stack.pop(loc))
@@ -42,7 +42,7 @@ def normalize(config_value, value_tensor):
 
     return ret_value
 
-def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = False):
+def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY, iteration=None):
     """Compute multi-view consistency scores for Gaussians to guide densification.
 
     For each camera in `camlist` the function renders the scene and computes a
@@ -78,9 +78,30 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         gt_image = my_viewpoint_cam.original_image.cuda()
         get_flag = True
         l1_loss_norm = get_loss(render_image, gt_image)
-        
-        # metric_map = (l1_loss_norm > args.loss_thresh).int()
-        metric_map = (l1_loss_norm > args.loss_thresh).to(torch.int32)
+            
+        metric_map = (l1_loss_norm > args.loss_thresh).int()
+
+        # Ref-score guides FastGS ADC; it does not spawn Gaussians by itself.
+        use_ref_score = False
+        ref_score_threshold = getattr(args, 'refscore_threshold_min', 0.5)
+        if (getattr(args, 'use_ref_score', False) and hasattr(my_viewpoint_cam, 'ref_score')
+                and iteration is not None and not getattr(args, 'disable_ref_score', False)):
+            if iteration % args.densification_refscore_interval == 0:
+                n_budget = getattr(args, 'max_refscore_gaussians', 0)
+                n_current = gaussians.get_xyz.shape[0]
+                if n_budget > 0 and n_current < n_budget:
+                    ratio = min(max(n_current / n_budget, 0.0), 1.0)
+                    decay_power = getattr(args, 'refscore_decay_power', 1.0)
+                    min_strength = getattr(args, 'refscore_min_strength', 0.15)
+                    strength = max((1.0 - ratio) ** decay_power, min_strength)
+                    threshold_min = getattr(args, 'refscore_threshold_min', 0.5)
+                    threshold_max = getattr(args, 'refscore_threshold_max', 0.9)
+                    ref_score_threshold = threshold_min + (1.0 - strength) * (threshold_max - threshold_min)
+                    use_ref_score = True
+
+        if use_ref_score:
+            ref_mask = (my_viewpoint_cam.ref_score.cuda() > ref_score_threshold).int()
+            metric_map = torch.max(metric_map, ref_mask)
 
         render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
 

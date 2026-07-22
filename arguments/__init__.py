@@ -9,13 +9,14 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-from argparse import ArgumentParser, Namespace
-import sys
-import os
+from argparse import ArgumentParser, Namespace #Tạo parser cho command line vd. --source_path, --iterations.
+import sys #Để lấy tham số command line từ sys.argv
+import os #xử lý path
 
 class GroupParams:
     pass
 
+#Phục vụ việc đưa parameters trong ModelParams thành flag --
 class ParamGroup:
     def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
         group = parser.add_argument_group(name)
@@ -44,9 +45,24 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
+#chứa các tham số liên quan đến dataset, model path, input images, representation architecture.
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
+        #ASG/Specular
+        self.asg_degree = 24
+        self.asg_num_theta = -1
+        self.asg_num_phi = -1
+        self.specular_hidden = -1
+        self.specular_layers = -1
+
+        #Dataset type
+        self.is_real = False
+        self.is_indoor = False
+
+        #SH parameters
         self.sh_degree = 3
+
+        #Path/input
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
@@ -61,34 +77,62 @@ class ModelParams(ParamGroup):
         g.source_path = os.path.abspath(g.source_path)
         return g
 
+#chứa tham số điều khiển cách renderer/pipeline tính toán
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
-        self.separate_sh = True
-        self.convert_SHs_python = False
-        self.compute_cov3D_python = False
-        self.debug = False
-        self.antialiasing = False
+        self.separate_sh = True #Tách xử lý SH Feature?
+        self.convert_SHs_python = False #Chuyển đổi SHs sang Python thay vì C++ (chậm hơn)
+        self.compute_cov3D_python = False #Tính toán covariance 3D bằng Python thay vì C++ (chậm hơn)
+        self.debug = False #Bật chế độ debug để log ra các tham số trong Rasterizer
+        self.antialiasing = False #Bật chế độ khử răng cưa
         super().__init__(parser, "Pipeline Parameters")
 
+#Nhóm tham số điều khiển quá trình train/optimize Gaussian
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
+
+        #Learning Rate Cho Gaussian Position (xyz)
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.feature_lr = 0.0025 
-        self.shfeature_lr = 0.005 
-        self.opacity_lr = 0.025 
+
+        #Learning Rate Cho Gaussian color
+        self.feature_lr = 0.0025
+        self.shfeature_lr = 0.005
+
+        #Lr cho opacity
+        self.opacity_lr = 0.025
+
+        #lr cho Geometry
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.percent_dense = 0.001
-        self.lambda_dssim = 0.2
+
+        #Densification/Pruning
+        self.percent_dense = 0.001 #Redundant parameter
+        self.lambda_dssim = 0.2 
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
-        self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
-        self.densify_grad_threshold = 0.0002
+        
+        #ref-score guided densification
+        self.densification_refscore_interval = 500
+        self.max_refscore_gaussians = -1 #Số lượng Gaussian tối đa mà ref-score guidance được phép tác động (-1 là tự tính budget)
+        self.refscore_budget_multiplier = 10.0
+        self.refscore_budget_min = 200000
+        self.refscore_budget_max = 1000000
+        self.refscore_decay_power = 1.0
+        self.refscore_min_strength = 0.15
+        self.refscore_threshold_min = 0.5 #Ngưỡng chọn vùng ref-score [min, max]
+        self.refscore_threshold_max = 0.9
+
+        self.refscore_conf_quantile = 0.85
+        self.refscore_conf_gamma = 1.5
+        self.refscore_conf_min = 0.0
+        self.num_score_cameras = 10
+        self.densify_from_iter = 500 #Start Densifying
+        self.densify_until_iter = 15_000 #Stop densifying
+        self.densify_grad_threshold = 0.0002 #Redundant parameter
         
         # fastgs parameters
         self.loss_thresh = 0.1
@@ -101,6 +145,44 @@ class OptimizationParams(ParamGroup):
 
         self.random_background = False
         self.optimizer_type = "default"
+
+        self.specular_lr_max_steps = 30000
+        self.specular_start_iter = 3000
+        self.full_asg_interval = 0
+        self.f_rest_warmup_until = 0
+        self.f_rest_interval_early = 16
+        self.f_rest_interval_mid = 32
+        self.f_rest_interval_late = 64
+        
+        # Representation Capacity / Role Separation
+        self.use_sh_spec_mask = False #giảm vai trò SH ở vùng specular để ASG học?
+        self.sh_spec_mask_threshold = 0.7
+        self.sh_spec_grad_scale = 0.0
+        self.sh_spec_mask_start = 3000 #ASG bắt đầu tham gia vào vùng specular từ iter này
+        self.sh_spec_min_metric_count = 1
+
+        # Supervision Signal
+        self.lambda_spec_l1_weight = 0.0
+        self.lambda_spec_reg = 0.0
+
+        # Shafer/Klinker Prior
+        self.ref_prior_method = "tan"
+        self.ti_thresh = 0.35
+        self.ti_bright = 0.6
+        self.sk_intensity = 0.7
+        self.sk_saturation = 0.2
+        self.ref_conf_gamma = 1.0
+        self.ref_conf_quantile = 0.0
+        self.ref_conf_smooth_radius = 0
+
+        self.use_ref_score = False #Geometric coverage bằng reflection score
+        self.disable_ref_score = False #Tắt reflection score?
+        self.use_adaptive_prior = False #Cập nhật prior động theo residual trong lúc train?
+        self.adaptive_prior_start = 5000 #Bắt đầu cập nhật prior động
+        self.adaptive_prior_interval = 3000
+        self.adaptive_prior_num_cameras = 20
+        self.adaptive_prior_ema = 0.7
+        
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

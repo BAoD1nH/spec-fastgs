@@ -1,39 +1,51 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
+# ============================================================
+# Dataset Readers (Final: FastGS + minimal SG)
+# ============================================================
 
 import os
 import sys
 from PIL import Image
-from typing import NamedTuple
-from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
-    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
-from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
+from typing import NamedTuple, Optional
+
 import numpy as np
 import json
 from pathlib import Path
+
 from plyfile import PlyData, PlyElement
+
+from scene.colmap_loader import (
+    read_extrinsics_text,
+    read_intrinsics_text,
+    qvec2rotmat,
+    read_extrinsics_binary,
+    read_intrinsics_binary,
+    read_points3D_binary,
+    read_points3D_text,
+)
+
+from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from utils.sh_utils import SH2RGB
+
 from scene.gaussian_model import BasicPointCloud
+
+
+# ------------------------------------------------------------
+# DATA STRUCTURES
+# ------------------------------------------------------------
 
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
     T: np.array
-    FovY: np.array
-    FovX: np.array
+    FovY: float
+    FovX: float
     image: np.array
     image_path: str
     image_name: str
     width: int
     height: int
+    depth: Optional[np.array] = None  # ✅ SG-compatible
+
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -42,14 +54,12 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
 
+
+# ------------------------------------------------------------
+# NORMALIZATION
+# ------------------------------------------------------------
+
 def getNerfppNorm(cam_info):
-    def get_center_and_diag(cam_centers):
-        cam_centers = np.hstack(cam_centers)
-        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
-        center = avg_cam_center
-        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
-        diagonal = np.max(dist)
-        return center.flatten(), diagonal
 
     cam_centers = []
 
@@ -58,123 +68,166 @@ def getNerfppNorm(cam_info):
         C2W = np.linalg.inv(W2C)
         cam_centers.append(C2W[:3, 3:4])
 
-    center, diagonal = get_center_and_diag(cam_centers)
-    radius = diagonal * 1.1
+    cam_centers = np.hstack(cam_centers)
 
-    translate = -center
+    center = np.mean(cam_centers, axis=1, keepdims=True)
+    dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
 
-    return {"translate": translate, "radius": radius}
+    radius = np.max(dist) * 1.1
+
+    return {
+        "translate": -center.flatten(),
+        "radius": radius
+    }
+
+
+# ------------------------------------------------------------
+# CAMERA LOADER (COLMAP)
+# ------------------------------------------------------------
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
+
     for idx, key in enumerate(cam_extrinsics):
-        sys.stdout.write('\r')
-        # the exact output you're looking for:
-        sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
+
+        sys.stdout.write(f"\rReading camera {idx+1}/{len(cam_extrinsics)}")
         sys.stdout.flush()
 
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
-        height = intr.height
-        width = intr.width
 
-        uid = intr.id
+        width = intr.width
+        height = intr.height
+
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
 
-        if intr.model=="SIMPLE_PINHOLE":
-            focal_length_x = intr.params[0]
-            FovY = focal2fov(focal_length_x, height)
-            FovX = focal2fov(focal_length_x, width)
-        elif intr.model=="PINHOLE":
-            focal_length_x = intr.params[0]
-            focal_length_y = intr.params[1]
-            FovY = focal2fov(focal_length_y, height)
-            FovX = focal2fov(focal_length_x, width)
-        else:
-            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+        # ---- intrinsics ----
+        if intr.model == "SIMPLE_PINHOLE":
+            fx = intr.params[0]
+            fy = fx
 
+        elif intr.model in ["PINHOLE", "OPENCV", "SIMPLE_RADIAL"]:
+            fx = intr.params[0]
+            fy = intr.params[1]
+
+        else:
+            raise RuntimeError("Unsupported camera model")
+
+        FovX = focal2fov(fx, width)
+        FovY = focal2fov(fy, height)
+
+        # ---- image ----
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
-        image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
-        cam_infos.append(cam_info)
-    sys.stdout.write('\n')
+        cam_infos.append(
+            CameraInfo(
+                uid=intr.id,
+                R=R,
+                T=T,
+                FovY=FovY,
+                FovX=FovX,
+                image=image,
+                image_path=image_path,
+                image_name=Path(image_path).stem,
+                width=width,
+                height=height,
+                depth=None,
+            )
+        )
+
+    sys.stdout.write("\n")
     return cam_infos
 
+
+# ------------------------------------------------------------
+# POINT CLOUD
+# ------------------------------------------------------------
+
 def fetchPly(path):
-    plydata = PlyData.read(path)
-    vertices = plydata['vertex']
-    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+    ply = PlyData.read(path)
+
+    v = ply["vertex"]
+
+    xyz = np.vstack([v["x"], v["y"], v["z"]]).T
+    rgb = np.vstack([v["red"], v["green"], v["blue"]]).T / 255.0
+    normal = np.vstack([v["nx"], v["ny"], v["nz"]]).T
+
+    return BasicPointCloud(points=xyz, colors=rgb, normals=normal)
+
 
 def storePly(path, xyz, rgb):
-    # Define the dtype for the structured array
-    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
-            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
-    
+    dtype = [
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
+        ("red", "u1"), ("green", "u1"), ("blue", "u1")
+    ]
+
     normals = np.zeros_like(xyz)
 
-    elements = np.empty(xyz.shape[0], dtype=dtype)
-    attributes = np.concatenate((xyz, normals, rgb), axis=1)
-    elements[:] = list(map(tuple, attributes))
+    data = np.empty(xyz.shape[0], dtype=dtype)
+    data[:] = list(map(tuple, np.concatenate((xyz, normals, rgb), axis=1)))
 
-    # Create the PlyData object and write to file
-    vertex_element = PlyElement.describe(elements, 'vertex')
-    ply_data = PlyData([vertex_element])
-    ply_data.write(path)
+    PlyData([PlyElement.describe(data, "vertex")]).write(path)
+
+
+# ------------------------------------------------------------
+# MAIN SCENE LOADER
+# ------------------------------------------------------------
 
 def readColmapSceneInfo(path, images, eval, llffhold=8):
+
     try:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
-        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+        extr = read_extrinsics_binary(os.path.join(path, "sparse/0/images.bin"))
+        intr = read_intrinsics_binary(os.path.join(path, "sparse/0/cameras.bin"))
     except:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
-        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+        extr = read_extrinsics_text(os.path.join(path, "sparse/0/images.txt"))
+        intr = read_intrinsics_text(os.path.join(path, "sparse/0/cameras.txt"))
 
-    reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
-    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    reading_dir = "images" if images is None else images
 
+    cam_infos = readColmapCameras(
+        extr,
+        intr,
+        os.path.join(path, reading_dir)
+    )
+
+    cam_infos = sorted(cam_infos, key=lambda x: x.image_name)
+
+    # split train/test
     if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        train = [c for i, c in enumerate(cam_infos) if i % llffhold != 0]
+        test = [c for i, c in enumerate(cam_infos) if i % llffhold == 0]
     else:
-        train_cam_infos = cam_infos
-        test_cam_infos = []
+        train = cam_infos
+        test = []
 
-    nerf_normalization = getNerfppNorm(train_cam_infos)
+    norm = getNerfppNorm(train)
 
+    # ---- point cloud ----
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
-    bin_path = os.path.join(path, "sparse/0/points3D.bin")
-    txt_path = os.path.join(path, "sparse/0/points3D.txt")
     if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
+            xyz, rgb, _ = read_points3D_binary(os.path.join(path, "sparse/0/points3D.bin"))
         except:
-            xyz, rgb, _ = read_points3D_text(txt_path)
+            xyz, rgb, _ = read_points3D_text(os.path.join(path, "sparse/0/points3D.txt"))
         storePly(ply_path, xyz, rgb)
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        pcd = None
 
-    scene_info = SceneInfo(point_cloud=pcd,
-                           train_cameras=train_cam_infos,
-                           test_cameras=test_cam_infos,
-                           nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
-    return scene_info
+    pcd = fetchPly(ply_path)
+
+    return SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train,
+        test_cameras=test,
+        nerf_normalization=norm,
+        ply_path=ply_path
+    )
+
+
+# ------------------------------------------------------------
+# CAMERA LOADER (BLENDER / SYNTHETIC)
+# ------------------------------------------------------------
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
@@ -198,7 +251,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             T = w2c[:3, 3]
 
             image_path = os.path.join(path, cam_name)
-            image_name = Path(cam_name).stem
+            # Retain subfolder name (train or test) to keep original folder structure
+            subfolder = Path(frame["file_path"]).parent.name
+            stem = Path(cam_name).stem
+            image_name = f"{subfolder}/{stem}" if subfolder else stem
+            
             image = Image.open(image_path)
 
             im_data = np.array(image.convert("RGBA"))
@@ -254,7 +311,13 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            ply_path=ply_path)
     return scene_info
 
+
+# ------------------------------------------------------------
+# INTERFACE
+# ------------------------------------------------------------
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender": readNerfSyntheticInfo
 }
+
