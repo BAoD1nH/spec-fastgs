@@ -1,0 +1,11 @@
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {1.1}{\ignorespaces Sơ đồ tổng quát của hệ thống Spec-FastGS.}}{8}{figure.caption.12}%
+\contentsline {figure}{\numberline {1.2}{\ignorespaces Sơ đồ chi tiết của hệ thống Spec-FastGS.}}{8}{figure.caption.13}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces So sánh định tính kết quả tái tạo bề mặt và hiệu ứng phản xạ ánh sáng giữa các phương pháp 3DGS, FastGS và Spec-FastGS (Ours) so với Ground Truth trên các cảnh thuộc bộ dữ liệu Mip-NeRF 360. Khung chữ nhật màu đỏ và ô hình phóng to ở góc dưới bên phải thể hiện chi tiết khả năng tái tạo phản xạ gương và giảm bớt bóng ma/nhiễu ảnh của Spec-FastGS.}}{112}{figure.caption.19}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces Enter Caption}}{113}{figure.caption.21}%
+\contentsline {figure}{\numberline {4.3}{\ignorespaces So sánh định tính kết quả tái tạo bề mặt và khả năng xử lý phản xạ gương góc nhìn (specular highlights) giữa các phương pháp 3DGS, FastGS và Spec-FastGS (Ours) so với Ground Truth trên các vật thể phản xạ tiêu biểu (\texttt {teapot}, \texttt {jupyter}, \texttt {ashtray}) thuộc bộ dữ liệu Anisotropic Synthetic Dataset. Ô vuông đỏ và ô hình phóng to ở góc dưới bên phải thể hiện chi tiết khả năng tách bạch thành phần phản xạ gương sắc nét và duy trì cấu trúc vật thể của Spec-FastGS.}}{113}{figure.caption.22}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }

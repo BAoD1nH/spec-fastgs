@@ -1,0 +1,603 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.2 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global}
+    \entry{chen2024survey3dgs}{article}{}
+      \name{author}{2}{}{%
+        {{hash=aac627c2ca98f417579307530b326b25}{%
+           family={Chen},
+           familyi={C\bibinitperiod},
+           given={Guikun},
+           giveni={G\bibinitperiod}}}%
+        {{hash=1422e568eb32feb9f85af63cdb196905}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Wenguan},
+           giveni={W\bibinitperiod}}}%
+      }
+      \strng{namehash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \strng{fullhash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \strng{bibnamehash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \strng{authorbibnamehash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \strng{authornamehash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \strng{authorfullhash}{f8001df6310338eca1fdaaf0f52d5a8a}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{cs.CV}
+      \field{eprinttype}{arXiv}
+      \field{journaltitle}{arXiv preprint arXiv:2401.03890}
+      \field{title}{A Survey on {3D} Gaussian Splatting}
+      \field{year}{2024}
+      \verb{eprint}
+      \verb 2401.03890
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2401.03890
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2401.03890
+      \endverb
+    \endentry
+    \entry{yang2024specgaussian}{inproceedings}{}
+      \name{author}{9}{}{%
+        {{hash=92620d557d6cbcb677377c2451949754}{%
+           family={Yang},
+           familyi={Y\bibinitperiod},
+           given={Ziyi},
+           giveni={Z\bibinitperiod}}}%
+        {{hash=03e7985fe5e84b74e9f01c4cdbaaee9c}{%
+           family={Gao},
+           familyi={G\bibinitperiod},
+           given={Xinyu},
+           giveni={X\bibinitperiod}}}%
+        {{hash=adf9ee157e629d41239e1bb2e381b9bf}{%
+           family={Sun},
+           familyi={S\bibinitperiod},
+           given={Yangtian},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=ccd5c947d91ff42bc885f520eaab8178}{%
+           family={Huang},
+           familyi={H\bibinitperiod},
+           given={Yihua},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=90d51032573b14fb4a1692c61490b5a9}{%
+           family={Lyu},
+           familyi={L\bibinitperiod},
+           given={Xiaoyang},
+           giveni={X\bibinitperiod}}}%
+        {{hash=b56d6fd86f6d64f4da71cb632887fcea}{%
+           family={Zhou},
+           familyi={Z\bibinitperiod},
+           given={Wen},
+           giveni={W\bibinitperiod}}}%
+        {{hash=38445de7e601a517090cdb582aa8ee1f}{%
+           family={Jiao},
+           familyi={J\bibinitperiod},
+           given={Shaohui},
+           giveni={S\bibinitperiod}}}%
+        {{hash=b21d751b50214e5e719eb624ac756bc0}{%
+           family={Qi},
+           familyi={Q\bibinitperiod},
+           given={Xiaojuan},
+           giveni={X\bibinitperiod}}}%
+        {{hash=c5403f7ff1826b30ac9ed368dfdaa557}{%
+           family={Jin},
+           familyi={J\bibinitperiod},
+           given={Xiaogang},
+           giveni={X\bibinitperiod}}}%
+      }
+      \strng{namehash}{12ab2a1adb994ec8290760663e8dc5f4}
+      \strng{fullhash}{dac1b3240211e83c4348fc8429d481a8}
+      \strng{bibnamehash}{12ab2a1adb994ec8290760663e8dc5f4}
+      \strng{authorbibnamehash}{12ab2a1adb994ec8290760663e8dc5f4}
+      \strng{authornamehash}{12ab2a1adb994ec8290760663e8dc5f4}
+      \strng{authorfullhash}{dac1b3240211e83c4348fc8429d481a8}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Advances in Neural Information Processing Systems}
+      \field{title}{{Spec-Gaussian}: Anisotropic View-Dependent Appearance for {3D} Gaussian Splatting}
+      \field{volume}{37}
+      \field{year}{2024}
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2402.15870
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2402.15870
+      \endverb
+    \endentry
+    \entry{jiang2024gaussianshader}{inproceedings}{}
+      \name{author}{7}{}{%
+        {{hash=eacb99f4835411b937ea3fdb371dbf2a}{%
+           family={Jiang},
+           familyi={J\bibinitperiod},
+           given={Yingwenqi},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=b0193eab12cf301ca3dbce2f48ae4719}{%
+           family={Tu},
+           familyi={T\bibinitperiod},
+           given={Jiadong},
+           giveni={J\bibinitperiod}}}%
+        {{hash=8e34231ba9b9318aa75b42a62d10fba4}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Yuan},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=935ac35f4ccfa275355ec136455b3734}{%
+           family={Gao},
+           familyi={G\bibinitperiod},
+           given={Xifeng},
+           giveni={X\bibinitperiod}}}%
+        {{hash=dd85145c2ffbc1fa0825a1ff4d9dda56}{%
+           family={Long},
+           familyi={L\bibinitperiod},
+           given={Xiaoxiao},
+           giveni={X\bibinitperiod}}}%
+        {{hash=cbf9bd0c687428039fe025eced393d59}{%
+           family={Wang},
+           familyi={W\bibinitperiod},
+           given={Wenping},
+           giveni={W\bibinitperiod}}}%
+        {{hash=59c3645a77ee1c7c6a60afc8f6a49db0}{%
+           family={Ma},
+           familyi={M\bibinitperiod},
+           given={Yuexin},
+           giveni={Y\bibinitperiod}}}%
+      }
+      \strng{namehash}{29f43f02cf66a084bd0bd62db2689876}
+      \strng{fullhash}{67b2a54c92f39861b1c34ead7dc74af7}
+      \strng{bibnamehash}{29f43f02cf66a084bd0bd62db2689876}
+      \strng{authorbibnamehash}{29f43f02cf66a084bd0bd62db2689876}
+      \strng{authornamehash}{29f43f02cf66a084bd0bd62db2689876}
+      \strng{authorfullhash}{67b2a54c92f39861b1c34ead7dc74af7}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}
+      \field{title}{{GaussianShader}: {3D} Gaussian Splatting with Shading Functions for Reflective Surfaces}
+      \field{year}{2024}
+      \field{pages}{5322\bibrangedash 5332}
+      \range{pages}{11}
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2311.17977
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2311.17977
+      \endverb
+    \endentry
+    \entry{zhang2025materialrefgs}{inproceedings}{}
+      \name{author}{6}{}{%
+        {{hash=e21b18f42572540c9a96b41774518ed6}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Wenyuan},
+           giveni={W\bibinitperiod}}}%
+        {{hash=03ce75c230ff87640c998017763d5e9f}{%
+           family={Tang},
+           familyi={T\bibinitperiod},
+           given={Jimin},
+           giveni={J\bibinitperiod}}}%
+        {{hash=b03c97712c9a3f7b2b13fb1c99dc4d60}{%
+           family={Zhang},
+           familyi={Z\bibinitperiod},
+           given={Weiqi},
+           giveni={W\bibinitperiod}}}%
+        {{hash=49a9a9c965001db641ceb0e392d3b385}{%
+           family={Fang},
+           familyi={F\bibinitperiod},
+           given={Yi},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=5a7089950b6f6fcad1411d0e0dbbe470}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Yu-Shen},
+           giveni={Y\bibinithyphendelim S\bibinitperiod}}}%
+        {{hash=31ad815d5683ccee8c6822649ea4a1c3}{%
+           family={Han},
+           familyi={H\bibinitperiod},
+           given={Zhizhong},
+           giveni={Z\bibinitperiod}}}%
+      }
+      \strng{namehash}{dd93efdc8d23b65f7d3a40a7e9060644}
+      \strng{fullhash}{0a1c0f6c6c7d482e9fe8ecddcefecc5e}
+      \strng{bibnamehash}{0a1c0f6c6c7d482e9fe8ecddcefecc5e}
+      \strng{authorbibnamehash}{0a1c0f6c6c7d482e9fe8ecddcefecc5e}
+      \strng{authornamehash}{dd93efdc8d23b65f7d3a40a7e9060644}
+      \strng{authorfullhash}{0a1c0f6c6c7d482e9fe8ecddcefecc5e}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Advances in Neural Information Processing Systems}
+      \field{title}{{MaterialRefGS}: Reflective Gaussian Splatting with Multi-view Consistent Material Inference}
+      \field{year}{2025}
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2510.11387
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2510.11387
+      \endverb
+    \endentry
+    \entry{ren2025fastgs}{article}{}
+      \name{author}{4}{}{%
+        {{hash=dccebbac8b2e8344b96b29c94e0813ff}{%
+           family={Ren},
+           familyi={R\bibinitperiod},
+           given={Shiwei},
+           giveni={S\bibinitperiod}}}%
+        {{hash=58516b38bdba5bd2474c3202cd3c74c4}{%
+           family={Wen},
+           familyi={W\bibinitperiod},
+           given={Tianci},
+           giveni={T\bibinitperiod}}}%
+        {{hash=1be285bc5a26052b9d905788e8b8e650}{%
+           family={Fang},
+           familyi={F\bibinitperiod},
+           given={Yongchun},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=9ed7ef432ff70439121f99cae303c6b0}{%
+           family={Lu},
+           familyi={L\bibinitperiod},
+           given={Biao},
+           giveni={B\bibinitperiod}}}%
+      }
+      \strng{namehash}{dc6df485973599ea28ff674a24df2450}
+      \strng{fullhash}{f2ae70cbcaa224c1a3e9a62c89788ef1}
+      \strng{bibnamehash}{f2ae70cbcaa224c1a3e9a62c89788ef1}
+      \strng{authorbibnamehash}{f2ae70cbcaa224c1a3e9a62c89788ef1}
+      \strng{authornamehash}{dc6df485973599ea28ff674a24df2450}
+      \strng{authorfullhash}{f2ae70cbcaa224c1a3e9a62c89788ef1}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{cs.CV}
+      \field{eprinttype}{arXiv}
+      \field{journaltitle}{arXiv preprint arXiv:2511.04283}
+      \field{title}{{FastGS}: Training {3D} Gaussian Splatting in 100 Seconds}
+      \field{year}{2025}
+      \verb{eprint}
+      \verb 2511.04283
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2511.04283
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2511.04283
+      \endverb
+    \endentry
+    \entry{mallick2024taming}{inproceedings}{}
+      \name{author}{6}{}{%
+        {{hash=1eb18d9cf88fc2668d8e406fb5e1685e}{%
+           family={Mallick},
+           familyi={M\bibinitperiod},
+           given={Saswat\bibnamedelima Subhajyoti},
+           giveni={S\bibinitperiod\bibinitdelim S\bibinitperiod}}}%
+        {{hash=92ddae3c581011ed8154b5cf1dc217c0}{%
+           family={Goel},
+           familyi={G\bibinitperiod},
+           given={Rahul},
+           giveni={R\bibinitperiod}}}%
+        {{hash=c73d638ffd25328757379835747302ff}{%
+           family={Kerbl},
+           familyi={K\bibinitperiod},
+           given={Bernhard},
+           giveni={B\bibinitperiod}}}%
+        {{hash=b1ea2917c3a7ebbe713bc1b375f8de51}{%
+           family={Carrasco},
+           familyi={C\bibinitperiod},
+           given={Francisco\bibnamedelima Vicente},
+           giveni={F\bibinitperiod\bibinitdelim V\bibinitperiod}}}%
+        {{hash=5a61fa301cd25cd8af1da7ed590d03ce}{%
+           family={Steinberger},
+           familyi={S\bibinitperiod},
+           given={Markus},
+           giveni={M\bibinitperiod}}}%
+        {{hash=bbc767f3ae3d0bb767e79f8120573a4f}{%
+           family={De\bibnamedelima La\bibnamedelima Torre},
+           familyi={D\bibinitperiod\bibinitdelim L\bibinitperiod\bibinitdelim T\bibinitperiod},
+           given={Fernando},
+           giveni={F\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Association for Computing Machinery}%
+      }
+      \strng{namehash}{fca2e97b39bcbb9890d456b48fb1106a}
+      \strng{fullhash}{a7b7efcb732c4013d584d746d75f0f54}
+      \strng{bibnamehash}{a7b7efcb732c4013d584d746d75f0f54}
+      \strng{authorbibnamehash}{a7b7efcb732c4013d584d746d75f0f54}
+      \strng{authornamehash}{fca2e97b39bcbb9890d456b48fb1106a}
+      \strng{authorfullhash}{a7b7efcb732c4013d584d746d75f0f54}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{SIGGRAPH Asia 2024 Conference Papers}
+      \field{title}{Taming {3DGS}: High-Quality Radiance Fields with Limited Resources}
+      \field{year}{2024}
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2406.15643
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2406.15643
+      \endverb
+    \endentry
+    \entry{hanson2024speedysplat}{article}{}
+      \name{author}{6}{}{%
+        {{hash=b4d9279bb8209a07fa8a6fa8cecca8f5}{%
+           family={Hanson},
+           familyi={H\bibinitperiod},
+           given={Alex},
+           giveni={A\bibinitperiod}}}%
+        {{hash=53077bc24663b3ba0bc6e322f49e0d66}{%
+           family={Tu},
+           familyi={T\bibinitperiod},
+           given={Allen},
+           giveni={A\bibinitperiod}}}%
+        {{hash=3da347b543d2f847ec9335135dbc227b}{%
+           family={Lin},
+           familyi={L\bibinitperiod},
+           given={Geng},
+           giveni={G\bibinitperiod}}}%
+        {{hash=cd1ee5b37f2e83956efb4b2ef21f830c}{%
+           family={Singla},
+           familyi={S\bibinitperiod},
+           given={Vasu},
+           giveni={V\bibinitperiod}}}%
+        {{hash=f8b89b955dad449fd9254a354c6041d2}{%
+           family={Zwicker},
+           familyi={Z\bibinitperiod},
+           given={Matthias},
+           giveni={M\bibinitperiod}}}%
+        {{hash=3b1fea9d27f10122cd27336b3dc68ea7}{%
+           family={Goldstein},
+           familyi={G\bibinitperiod},
+           given={Tom},
+           giveni={T\bibinitperiod}}}%
+      }
+      \strng{namehash}{bf4a49b5667bda7634207ae2e5725882}
+      \strng{fullhash}{fbcc9dbfbe5ffa38fbd041a7eaef728e}
+      \strng{bibnamehash}{fbcc9dbfbe5ffa38fbd041a7eaef728e}
+      \strng{authorbibnamehash}{fbcc9dbfbe5ffa38fbd041a7eaef728e}
+      \strng{authornamehash}{bf4a49b5667bda7634207ae2e5725882}
+      \strng{authorfullhash}{fbcc9dbfbe5ffa38fbd041a7eaef728e}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{cs.CV}
+      \field{eprinttype}{arXiv}
+      \field{journaltitle}{arXiv preprint arXiv:2412.00578}
+      \field{title}{{Speedy-Splat}: Fast {3D} Gaussian Splatting with Sparse Pixels and Sparse Primitives}
+      \field{year}{2024}
+      \verb{eprint}
+      \verb 2412.00578
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2412.00578
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2412.00578
+      \endverb
+    \endentry
+    \entry{mildenhall2020nerf}{inproceedings}{}
+      \name{author}{6}{}{%
+        {{hash=a3567364ab52973659adf74ee0c6e6f3}{%
+           family={Mildenhall},
+           familyi={M\bibinitperiod},
+           given={Ben},
+           giveni={B\bibinitperiod}}}%
+        {{hash=b503d22b8c86fb9dfd477d2f70a59650}{%
+           family={Srinivasan},
+           familyi={S\bibinitperiod},
+           given={Pratul\bibnamedelima P.},
+           giveni={P\bibinitperiod\bibinitdelim P\bibinitperiod}}}%
+        {{hash=9a18985a5c8b8be23d0ec9de0a3c87b9}{%
+           family={Tancik},
+           familyi={T\bibinitperiod},
+           given={Matthew},
+           giveni={M\bibinitperiod}}}%
+        {{hash=562f3254a241932db4a6d44a97473ec5}{%
+           family={Barron},
+           familyi={B\bibinitperiod},
+           given={Jonathan\bibnamedelima T.},
+           giveni={J\bibinitperiod\bibinitdelim T\bibinitperiod}}}%
+        {{hash=e7e274981ceb0dd123d44af35cc7bedf}{%
+           family={Ramamoorthi},
+           familyi={R\bibinitperiod},
+           given={Ravi},
+           giveni={R\bibinitperiod}}}%
+        {{hash=96e30bdc2cf905aa1109c46617b16252}{%
+           family={Ng},
+           familyi={N\bibinitperiod},
+           given={Ren},
+           giveni={R\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Springer}%
+      }
+      \strng{namehash}{4d426255f49fbfdee4dcf85e64cc11d8}
+      \strng{fullhash}{9bee638bba28fb3cd739399aa8dc9983}
+      \strng{bibnamehash}{9bee638bba28fb3cd739399aa8dc9983}
+      \strng{authorbibnamehash}{9bee638bba28fb3cd739399aa8dc9983}
+      \strng{authornamehash}{4d426255f49fbfdee4dcf85e64cc11d8}
+      \strng{authorfullhash}{9bee638bba28fb3cd739399aa8dc9983}
+      \field{sortinit}{5}
+      \field{sortinithash}{20e9b4b0b173788c5dace24730f47d8c}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Computer Vision -- ECCV 2020}
+      \field{title}{{NeRF}: Representing Scenes as Neural Radiance Fields for View Synthesis}
+      \field{year}{2020}
+      \field{pages}{405\bibrangedash 421}
+      \range{pages}{17}
+      \verb{doi}
+      \verb 10.1007/978-3-030-58452-8_24
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2003.08934
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2003.08934
+      \endverb
+    \endentry
+    \entry{kerbl2023gaussian}{article}{}
+      \name{author}{4}{}{%
+        {{hash=c73d638ffd25328757379835747302ff}{%
+           family={Kerbl},
+           familyi={K\bibinitperiod},
+           given={Bernhard},
+           giveni={B\bibinitperiod}}}%
+        {{hash=2ab758a425dcd6ed440f4ae0d994dc2c}{%
+           family={Kopanas},
+           familyi={K\bibinitperiod},
+           given={Georgios},
+           giveni={G\bibinitperiod}}}%
+        {{hash=23f06719145b1e18e13a7e436bb8c2fc}{%
+           family={Leimkühler},
+           familyi={L\bibinitperiod},
+           given={Thomas},
+           giveni={T\bibinitperiod}}}%
+        {{hash=70ecb4c4a672f7c20e4b53b57d5a437e}{%
+           family={Drettakis},
+           familyi={D\bibinitperiod},
+           given={George},
+           giveni={G\bibinitperiod}}}%
+      }
+      \strng{namehash}{8479b049e52b63ea21fe5e3437d87ed2}
+      \strng{fullhash}{36d84a8a291db8ba20b3f78b93a2eeee}
+      \strng{bibnamehash}{36d84a8a291db8ba20b3f78b93a2eeee}
+      \strng{authorbibnamehash}{36d84a8a291db8ba20b3f78b93a2eeee}
+      \strng{authornamehash}{8479b049e52b63ea21fe5e3437d87ed2}
+      \strng{authorfullhash}{36d84a8a291db8ba20b3f78b93a2eeee}
+      \field{sortinit}{7}
+      \field{sortinithash}{108d0be1b1bee9773a1173443802c0a3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{ACM Transactions on Graphics}
+      \field{number}{4}
+      \field{title}{{3D} Gaussian Splatting for Real-Time Radiance Field Rendering}
+      \field{volume}{42}
+      \field{year}{2023}
+      \field{pages}{1\bibrangedash 14}
+      \range{pages}{14}
+      \verb{doi}
+      \verb 10.1145/3592433
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2308.04079
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2308.04079
+      \endverb
+    \endentry
+    \entry{chen2025dashgaussian}{inproceedings}{}
+      \name{author}{7}{}{%
+        {{hash=a90c26481b17285ef8431fb4726fc3aa}{%
+           family={Chen},
+           familyi={C\bibinitperiod},
+           given={Youyu},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=49a82d9137cd3ea2a22b39dd2069c62a}{%
+           family={Jiang},
+           familyi={J\bibinitperiod},
+           given={Junjun},
+           giveni={J\bibinitperiod}}}%
+        {{hash=21581c457fd376d8c831f8ecae2bd7c5}{%
+           family={Jiang},
+           familyi={J\bibinitperiod},
+           given={Kui},
+           giveni={K\bibinitperiod}}}%
+        {{hash=d0bb3bcbc287d2d02322475fc1badc5b}{%
+           family={Tang},
+           familyi={T\bibinitperiod},
+           given={Xiao},
+           giveni={X\bibinitperiod}}}%
+        {{hash=18d2574a9eb92c0dfe1587eb7328d2a8}{%
+           family={Li},
+           familyi={L\bibinitperiod},
+           given={Zhihao},
+           giveni={Z\bibinitperiod}}}%
+        {{hash=d6e347bd4a9d11d663e9c03a39e7c0a4}{%
+           family={Liu},
+           familyi={L\bibinitperiod},
+           given={Xianming},
+           giveni={X\bibinitperiod}}}%
+        {{hash=65ffd910e4e3bcc0ebe958bd1e5475dd}{%
+           family={Nie},
+           familyi={N\bibinitperiod},
+           given={Yinyu},
+           giveni={Y\bibinitperiod}}}%
+      }
+      \strng{namehash}{9347ebe4b08e6afbd8d7ff6c3d59598d}
+      \strng{fullhash}{618fba2bf44bda715a9a22162b33dcb4}
+      \strng{bibnamehash}{9347ebe4b08e6afbd8d7ff6c3d59598d}
+      \strng{authorbibnamehash}{9347ebe4b08e6afbd8d7ff6c3d59598d}
+      \strng{authornamehash}{9347ebe4b08e6afbd8d7ff6c3d59598d}
+      \strng{authorfullhash}{618fba2bf44bda715a9a22162b33dcb4}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}
+      \field{title}{{DashGaussian}: Optimizing {3D} Gaussian Splatting in 200 Seconds}
+      \field{year}{2025}
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2503.18402
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2503.18402
+      \endverb
+    \endentry
+    \entry{schonberger2016sfm}{inproceedings}{}
+      \name{author}{2}{}{%
+        {{hash=85c10679ad8f08c2b0ea65e5de627728}{%
+           family={Schönberger},
+           familyi={S\bibinitperiod},
+           given={Johannes\bibnamedelima L.},
+           giveni={J\bibinitperiod\bibinitdelim L\bibinitperiod}}}%
+        {{hash=4af0c62bceb93c143845555052179bc8}{%
+           family={Frahm},
+           familyi={F\bibinitperiod},
+           given={Jan-Michael},
+           giveni={J\bibinithyphendelim M\bibinitperiod}}}%
+      }
+      \strng{namehash}{7120836da95b1762fede0804465dc2f5}
+      \strng{fullhash}{7120836da95b1762fede0804465dc2f5}
+      \strng{bibnamehash}{7120836da95b1762fede0804465dc2f5}
+      \strng{authorbibnamehash}{7120836da95b1762fede0804465dc2f5}
+      \strng{authornamehash}{7120836da95b1762fede0804465dc2f5}
+      \strng{authorfullhash}{7120836da95b1762fede0804465dc2f5}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition}
+      \field{title}{Structure-from-Motion Revisited}
+      \field{year}{2016}
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+
