@@ -5,6 +5,7 @@
 import torch
 import os
 import time
+import json
 from tqdm import tqdm
 from os import makedirs
 import torchvision
@@ -86,7 +87,10 @@ def render_set(
         sh_image = sh_pkg["render"]
 
         # Full render (SH + specular)
-        start_time = time.time()
+        # CUDA kernels are asynchronous, so synchronize around the timed
+        # section to measure the actual rendering time.
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
 
         render_pkg = render_fastgs(
             view,
@@ -97,7 +101,8 @@ def render_set(
             mlp_color=mlp_color
         )
 
-        end_time = time.time()
+        torch.cuda.synchronize()
+        end_time = time.perf_counter()
         total_time += (end_time - start_time)
 
         rendering = render_pkg["render"]
@@ -164,6 +169,25 @@ def render_set(
     fps = 1.0 / avg_time if avg_time > 0 else 0.0
 
     print(f"[{name}] {num_frames} frames | FPS: {fps:.2f}")
+    return fps
+
+
+def save_fps_to_results(model_path, iteration, fps):
+    """Add test-render FPS without discarding any existing image metrics."""
+    results_path = os.path.join(model_path, "results.json")
+    results = {}
+    if os.path.isfile(results_path):
+        try:
+            with open(results_path, "r") as fp:
+                results = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            results = {}
+
+    method = f"ours_{iteration}"
+    results.setdefault(method, {})["FPS"] = fps
+    with open(results_path, "w") as fp:
+        json.dump(results, fp, indent=True)
+    print(f"Saved test FPS to {results_path}")
 
 
 # ------------------------------------------------------------
@@ -240,7 +264,7 @@ def render_sets(
 
         if args.only_heatmap or not skip_test:
             if not args.only_heatmap:
-                render_set(
+                test_fps = render_set(
                     dataset.model_path,
                     "test",
                     scene.loaded_iter,
@@ -250,6 +274,11 @@ def render_sets(
                     background,
                     specular_mlp,
                     args
+                )
+                save_fps_to_results(
+                    dataset.model_path,
+                    scene.loaded_iter,
+                    test_fps
                 )
             heatmap_path = save_gaussian_view_heatmaps(
                 scene.getTestCameras(),

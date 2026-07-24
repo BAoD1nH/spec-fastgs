@@ -124,6 +124,36 @@ def evaluate(model_paths):
     for scene_dir in model_paths:
         try:
             print("Scene:", scene_dir)
+            # render.py runs before metrics.py and stores FPS in results.json.
+            # Preserve it when rebuilding the file with image-quality metrics.
+            previous_results = {}
+            results_path = Path(scene_dir) / "results.json"
+            if results_path.is_file():
+                try:
+                    with open(results_path, "r") as fp:
+                        previous_results = json.load(fp)
+                except (OSError, json.JSONDecodeError):
+                    previous_results = {}
+
+            training_metrics = {}
+            train_info_path = Path(scene_dir) / "train_info.json"
+            if train_info_path.is_file():
+                try:
+                    with open(train_info_path, "r") as fp:
+                        train_info = json.load(fp)
+                    training_metrics = {
+                        "Gaussian_Number": train_info.get("final_gaussians"),
+                        "Training_Time_Seconds": train_info.get("training_time_seconds"),
+                        "Peak_VRAM_MiB": train_info.get("peak_vram_mib"),
+                    }
+                    training_metrics = {
+                        key: value
+                        for key, value in training_metrics.items()
+                        if value is not None
+                    }
+                except (OSError, json.JSONDecodeError):
+                    training_metrics = {}
+
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             grouped_dict[scene_dir] = {}
@@ -177,6 +207,10 @@ def evaluate(model_paths):
                     "PSNR": torch.tensor(psnrs).mean().item(),
                     "LPIPS": torch.tensor(lpipss).mean().item()
                 }
+                previous_method = previous_results.get(method, {})
+                if "FPS" in previous_method:
+                    main_metrics["FPS"] = previous_method["FPS"]
+                main_metrics.update(training_metrics)
                 main_per_view = {
                     "SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
                     "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},

@@ -10,7 +10,7 @@ export CUDA_VISIBLE_DEVICES=0
 DATA_ROOT=./datasets/mipnerf360
 OUTPUT_ROOT=./output
 SCENE=bicycle
-IMAGES=images_8
+IMAGES=images_4
 
 # Important final knobs
 ASG_DEGREE=64
@@ -81,29 +81,29 @@ if [ "$USE_REF_SCORE" = "True" ] && [ "$EXTRACT_REF_PRIOR" = "True" ]; then
 fi
 
 # 1. TRAIN
-python train.py \
-    -s ${DATA_ROOT}/${SCENE} \
-    -m ${OUTPUT_ROOT}/${SCENE} \
-    -i ${IMAGES} \
-    --eval \
-    --iterations 30000 \
-    --densification_interval 100 \
-    --optimizer_type default \
-    --asg_degree ${ASG_DEGREE} \
-    --is_real \
-    --is_indoor \
-    --sh_degree 3 \
-    --highfeature_lr 0.02 \
-    --grad_abs_thresh 0.0004 \
-    --specular_start_iter 3000 \
-    --ref_prior_method ${REF_PRIOR_METHOD} \
-    --sh_spec_grad_scale ${SH_SPEC_GRAD_SCALE} \
-    --sh_spec_mask_start ${SH_SPEC_MASK_START} \
-    --sh_spec_mask_threshold ${SH_SPEC_MASK_THRESHOLD} \
-    --sh_spec_min_metric_count ${SH_SPEC_MIN_METRIC_COUNT} \
-    ${REF_SCORE_FLAG} \
-    ${ADAPTIVE_PRIOR_FLAG} \
-    ${SH_SPEC_MASK_FLAG}
+# python train.py \
+#     -s ${DATA_ROOT}/${SCENE} \
+#     -m ${OUTPUT_ROOT}/${SCENE} \
+#     -i ${IMAGES} \
+#     --eval \
+#     --iterations 30000 \
+#     --densification_interval 100 \
+#     --optimizer_type default \
+#     --asg_degree ${ASG_DEGREE} \
+#     --is_real \
+#     --is_indoor \
+#     --sh_degree 3 \
+#     --highfeature_lr 0.02 \
+#     --grad_abs_thresh 0.0004 \
+#     --specular_start_iter 3000 \
+#     --ref_prior_method ${REF_PRIOR_METHOD} \
+#     --sh_spec_grad_scale ${SH_SPEC_GRAD_SCALE} \
+#     --sh_spec_mask_start ${SH_SPEC_MASK_START} \
+#     --sh_spec_mask_threshold ${SH_SPEC_MASK_THRESHOLD} \
+#     --sh_spec_min_metric_count ${SH_SPEC_MIN_METRIC_COUNT} \
+#     ${REF_SCORE_FLAG} \
+#     ${ADAPTIVE_PRIOR_FLAG} \
+#     ${SH_SPEC_MASK_FLAG}
 
 # 2. RENDER
 python render.py \
