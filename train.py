@@ -4,7 +4,8 @@
 
 import torch
 import numpy as np
-import os, time, sys, json
+import os, time, sys, json, math
+from io import BytesIO
 from random import randint
 from tqdm import tqdm
 import uuid
@@ -15,6 +16,8 @@ from utils.image_utils import psnr
 
 from gaussian_renderer import render_fastgs
 from scene import Scene, GaussianModel, SpecularModel
+from scene.cameras import MiniCam
+from utils.graphics_utils import getProjectionMatrix
 
 from utils.general_utils import safe_state
 from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
@@ -47,6 +50,64 @@ def configure_refscore_budget(opt, initial_gaussians):
         print(f"[Ref Score Budget] cap: {opt.max_refscore_gaussians:,} Gaussians")
 
 
+def _tensor_to_jpeg(image, quality=86):
+    """Encode a CUDA CHW float image without requiring extra web packages."""
+    from PIL import Image
+    pixels = (image.detach().clamp(0, 1).mul(255).byte()
+              .permute(1, 2, 0).contiguous().cpu().numpy())
+    output = BytesIO()
+    Image.fromarray(pixels).save(output, format="JPEG", quality=quality)
+    return output.getvalue()
+
+
+def _make_orbit_camera(base_camera, target, settings, width, height):
+    """Create a browser-controlled MiniCam around a fixed scene target."""
+    base_eye = base_camera.camera_center.detach().cpu().numpy()
+    target = np.asarray(target, dtype=np.float32)
+    offset = base_eye - target
+    radius = max(float(np.linalg.norm(offset)), 1e-3) * float(settings["zoom"])
+    base_yaw = math.atan2(float(offset[0]), float(offset[2]))
+    base_pitch = math.asin(float(np.clip(offset[1] / max(np.linalg.norm(offset), 1e-6), -1, 1)))
+    yaw = base_yaw + float(settings["yaw"])
+    pitch = np.clip(base_pitch + float(settings["pitch"]), -1.45, 1.45)
+    eye = target + radius * np.array([
+        math.cos(pitch) * math.sin(yaw), math.sin(pitch),
+        math.cos(pitch) * math.cos(yaw)
+    ], dtype=np.float32)
+
+    forward = target - eye
+    forward /= np.linalg.norm(forward) + 1e-8
+    world_up = np.array([0, 1, 0], dtype=np.float32)
+    right = np.cross(forward, world_up)
+    if np.linalg.norm(right) < 1e-5:
+        world_up = np.array([0, 0, 1], dtype=np.float32)
+        right = np.cross(forward, world_up)
+    right /= np.linalg.norm(right) + 1e-8
+    down = np.cross(forward, right)
+    rotation = np.stack([right, down, forward], axis=0)
+    translation = -rotation @ eye
+    w2v = np.eye(4, dtype=np.float32)
+    w2v[:3, :3] = rotation
+    w2v[:3, 3] = translation
+    world_view = torch.tensor(w2v).transpose(0, 1).cuda()
+
+    fov_scale = float(settings["fov_scale"])
+    fovx = min(float(base_camera.FoVx) * fov_scale, math.radians(150))
+    fovy = min(2 * math.atan(math.tan(fovx / 2) * height / width), math.radians(150))
+    projection = getProjectionMatrix(
+        znear=base_camera.znear, zfar=base_camera.zfar, fovX=fovx, fovY=fovy
+    ).transpose(0, 1).cuda()
+    return MiniCam(width, height, fovy, fovx, base_camera.znear,
+                   base_camera.zfar, world_view, world_view @ projection)
+
+
+def _geometry_colors(gaussians):
+    """High-contrast scale encoding that exposes individual Gaussian splats."""
+    scale = gaussians.get_scaling.detach().mean(dim=1)
+    lo, hi = torch.quantile(scale, 0.05), torch.quantile(scale, 0.95)
+    value = ((scale - lo) / (hi - lo + 1e-8)).clamp(0, 1)
+    return torch.stack((0.18 + 0.82 * value, 0.95 - 0.62 * value,
+                        0.95 * (1.0 - value)), dim=1)
 def build_ref_score_confidence(ref_score, opt):
     """
     Keep broad RefScore for densification, but derive a conservative confidence
@@ -179,6 +240,29 @@ def training(dataset, opt, pipe):
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    # ------------------------------------------------------------
+    # OPTIONAL LIVE WEB VIEWER
+    # ------------------------------------------------------------
+    web_viewer = None
+    web_stats = []
+    web_base_camera = None
+    web_target = None
+    web_frames_dir = os.path.join(scene.model_path, "web_viewer_frames")
+    if getattr(opt, "web_viewer", False):
+        viewer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web-viewer")
+        if viewer_dir not in sys.path:
+            sys.path.insert(0, viewer_dir)
+        from server import ViewerServer
+        web_viewer = ViewerServer(opt.web_host, opt.web_http_port, opt.web_ws_port)
+        web_viewer.configure(
+            interval=opt.web_stream_interval,
+            save_frames=opt.web_save_frames,
+        )
+        web_viewer.start()
+        web_base_camera = scene.getTrainCameras()[randint(0, len(scene.getTrainCameras()) - 1)]
+        web_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+        os.makedirs(web_frames_dir, exist_ok=True)
 
     # ------------------------------------------------------------
     # LOAD REFLECTION PRIORS (If available)
@@ -501,6 +585,78 @@ def training(dataset, opt, pipe):
                     camlist, gaussians, pipe, background, opt, False, iteration=iteration
                 )
             gaussians.final_prune_fastgs(min_opacity=0.1, pruning_score=pruning_score)
+
+        # --------------------------------------------------------
+        # LIVE VIEWER + PER-ITERATION TELEMETRY
+        # --------------------------------------------------------
+        if web_viewer is not None:
+            settings = web_viewer.poll_settings()
+            while settings["paused"]:
+                time.sleep(0.05)
+                settings = web_viewer.poll_settings()
+
+            torch.cuda.synchronize()
+            allocated_mib = torch.cuda.memory_allocated() / (1024 ** 2)
+            reserved_mib = torch.cuda.memory_reserved() / (1024 ** 2)
+            gaussian_count = int(gaussians.get_xyz.shape[0])
+            web_stats.append({
+                "iteration": iteration,
+                "gaussian_count": gaussian_count,
+                "vram_allocated_mib": round(allocated_mib, 2),
+                "vram_reserved_mib": round(reserved_mib, 2),
+            })
+
+            interval = max(1, int(settings["interval"]))
+            should_render_web = iteration % interval == 0 and (
+                web_viewer.has_clients() or settings["save_frames"]
+            )
+            if should_render_web:
+                with torch.no_grad():
+                    viewer_cam = _make_orbit_camera(
+                        web_base_camera, web_target, settings,
+                        opt.web_width, opt.web_height
+                    )
+                    viewer_xyz = gaussians.get_xyz
+                    viewer_dir = viewer_xyz - viewer_cam.camera_center
+                    viewer_dir = viewer_dir / (viewer_dir.norm(dim=1, keepdim=True) + 1e-6)
+                    viewer_normal = gaussians.get_normal_axis(viewer_dir)
+                    viewer_spec = None
+                    if iteration > opt.specular_start_iter:
+                        viewer_spec = specular_mlp.step(
+                            gaussians.get_asg_features, viewer_dir, viewer_normal
+                        )
+                    rgb_frame = render_fastgs(
+                        viewer_cam, gaussians, pipe, background, opt.mult,
+                        mlp_color=viewer_spec
+                    )["render"]
+                    geometry_opacity = torch.full_like(
+                        gaussians.get_opacity, float(settings["geometry_opacity"])
+                    )
+                    geometry_frame = render_fastgs(
+                        viewer_cam, gaussians, pipe,
+                        torch.tensor([0.015, 0.02, 0.022], device="cuda"), opt.mult,
+                        scaling_modifier=float(settings["splat_scale"]),
+                        override_color=_geometry_colors(gaussians),
+                        opacity_override=geometry_opacity,
+                    )["render"]
+                    rgb_jpeg = _tensor_to_jpeg(rgb_frame)
+                    geometry_jpeg = _tensor_to_jpeg(geometry_frame)
+
+                web_viewer.publish(iteration, gaussian_count, allocated_mib,
+                                   reserved_mib, rgb_jpeg, geometry_jpeg)
+                if settings["save_frames"]:
+                    for name, encoded in (("rgb", rgb_jpeg), ("geometry", geometry_jpeg)):
+                        folder = os.path.join(web_frames_dir, name)
+                        os.makedirs(folder, exist_ok=True)
+                        with open(os.path.join(folder, f"{iteration:06d}.jpg"), "wb") as frame_file:
+                            frame_file.write(encoded)
+
+            if iteration % 100 == 0 or iteration == opt.iterations:
+                with open(os.path.join(scene.model_path, "web_viewer_stats.json"), "w") as stats_file:
+                    json.dump({
+                        "camera_image": web_base_camera.image_name,
+                        "samples": web_stats,
+                    }, stats_file, indent=2)
 
         # --------------------------------------------------------
         # SAVE

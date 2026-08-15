@@ -92,6 +92,16 @@ class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
 
+        # Live browser visualization (server-side CUDA rendering)
+        self.web_viewer = False
+        self.web_host = "127.0.0.1"
+        self.web_http_port = 8080
+        self.web_ws_port = 6009
+        self.web_stream_interval = 10
+        self.web_width = 960
+        self.web_height = 540
+        self.web_save_frames = False
+
         #Learning Rate Cho Gaussian Position (xyz)
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016

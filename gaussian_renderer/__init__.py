@@ -24,6 +24,7 @@ def render_fastgs(
     mlp_color=None,                 	# ✅ SPECULAR từ ngoài truyền vào
     scaling_modifier=1.0, 
     override_color=None, #nếu muốn bỏ qua SH color và ép màu khác, ví dụ debug depth.
+    opacity_override=None,
     get_flag=False, #dùng cho FastGS metric accumulation/densification.
     metric_map=None
 ):
@@ -87,7 +88,7 @@ def render_fastgs(
     # ------------------------------------------------------------
 
     means3D = pc.get_xyz
-    opacity = pc.get_opacity
+    opacity = pc.get_opacity if opacity_override is None else opacity_override
 
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
