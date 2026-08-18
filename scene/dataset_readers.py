@@ -275,15 +275,33 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
-    print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
-    print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
-    
-    if not eval:
-        train_cam_infos.extend(test_cam_infos)
-        test_cam_infos = []
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png", llffhold=8):
+    single_transforms = os.path.join(path, "transforms.json")
+    split_transforms = os.path.join(path, "transforms_train.json")
+    if os.path.isfile(single_transforms) and not os.path.isfile(split_transforms):
+        print("Reading Transforms")
+        cam_infos = readCamerasFromTransforms(
+            path, "transforms.json", white_background, extension
+        )
+        if eval:
+            train_cam_infos = [cam for i, cam in enumerate(cam_infos) if i % llffhold != 0]
+            test_cam_infos = [cam for i, cam in enumerate(cam_infos) if i % llffhold == 0]
+        else:
+            train_cam_infos = cam_infos
+            test_cam_infos = []
+    else:
+        print("Reading Training Transforms")
+        train_cam_infos = readCamerasFromTransforms(
+            path, "transforms_train.json", white_background, extension
+        )
+        print("Reading Test Transforms")
+        test_cam_infos = readCamerasFromTransforms(
+            path, "transforms_test.json", white_background, extension
+        )
+
+        if not eval:
+            train_cam_infos.extend(test_cam_infos)
+            test_cam_infos = []
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -320,4 +338,3 @@ sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo
 }
-

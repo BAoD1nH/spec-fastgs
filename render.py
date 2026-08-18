@@ -44,8 +44,6 @@ def render_set(
     makedirs(gts_path, exist_ok=True)
     makedirs(spec_path, exist_ok=True)
 
-    total_time = 0.0
-
     for idx, view in enumerate(tqdm(views, desc=f"{name} rendering")):
 
         # --------------------------------------------------------
@@ -87,11 +85,6 @@ def render_set(
         sh_image = sh_pkg["render"]
 
         # Full render (SH + specular)
-        # CUDA kernels are asynchronous, so synchronize around the timed
-        # section to measure the actual rendering time.
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
-
         render_pkg = render_fastgs(
             view,
             gaussians,
@@ -100,10 +93,6 @@ def render_set(
             args.mult,
             mlp_color=mlp_color
         )
-
-        torch.cuda.synchronize()
-        end_time = time.perf_counter()
-        total_time += (end_time - start_time)
 
         rendering = render_pkg["render"]
         gt = view.original_image[0:3, :, :]
@@ -164,11 +153,48 @@ def render_set(
         # end frame loop
         # --------------------------------------------------------
 
-    num_frames = len(views)
-    avg_time = total_time / num_frames if num_frames > 0 else 0.0
+    # Benchmark inference separately so image saving and diagnostic renders are
+    # excluded, while all per-frame ASG work is included. This matches the
+    # timing scope used by Specular-Gaussians: view direction, normal, ASG MLP,
+    # and final rasterization/compositing.
+    frame_times = []
+    for view in tqdm(views, desc=f"{name} FPS test"):
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+
+        xyz = gaussians.get_xyz
+        cam_center = view.camera_center.to("cuda")
+        viewdir = xyz - cam_center
+        viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+        normal = gaussians.get_normal_axis(viewdir).to("cuda")
+        mlp_color = specular_mlp.step(
+            gaussians.get_asg_features.to("cuda"),
+            viewdir,
+            normal
+        )
+        render_fastgs(
+            view,
+            gaussians,
+            pipeline,
+            background,
+            args.mult,
+            mlp_color=mlp_color
+        )
+
+        torch.cuda.synchronize()
+        frame_times.append(time.perf_counter() - start_time)
+
+    # Ignore the first five frames after model loading as GPU warm-up, like
+    # the reference Specular-Gaussians benchmark.
+    timed_frames = frame_times[5:] if len(frame_times) > 5 else frame_times
+    num_frames = len(timed_frames)
+    avg_time = sum(timed_frames) / num_frames if num_frames > 0 else 0.0
     fps = 1.0 / avg_time if avg_time > 0 else 0.0
 
-    print(f"[{name}] {num_frames} frames | FPS: {fps:.2f}")
+    print(
+        f"[{name}] {num_frames} timed frames | "
+        f"end-to-end FPS: {fps:.2f} ({avg_time * 1000.0:.3f} ms/frame)"
+    )
     return fps
 
 

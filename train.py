@@ -84,6 +84,12 @@ def _make_orbit_camera(base_camera, target, settings, width, height):
         right = np.cross(forward, world_up)
     right /= np.linalg.norm(right) + 1e-8
     down = np.cross(forward, right)
+    roll = float(settings.get("roll", 0.0))
+    if roll:
+        cos_roll, sin_roll = math.cos(roll), math.sin(roll)
+        original_right, original_down = right.copy(), down.copy()
+        right = cos_roll * original_right + sin_roll * original_down
+        down = -sin_roll * original_right + cos_roll * original_down
     rotation = np.stack([right, down, forward], axis=0)
     translation = -rotation @ eye
     w2v = np.eye(4, dtype=np.float32)
@@ -108,6 +114,111 @@ def _geometry_colors(gaussians):
     value = ((scale - lo) / (hi - lo + 1e-8)).clamp(0, 1)
     return torch.stack((0.18 + 0.82 * value, 0.95 - 0.62 * value,
                         0.95 * (1.0 - value)), dim=1)
+
+
+def _render_web_pair(base_camera, target, settings, width, height, gaussians,
+                     specular_mlp, pipe, background, mult, use_asg,
+                     capture_all=False):
+    """Render synchronized geometry/RGB frames for live and final-viewer modes."""
+    component = str(settings.get("rgb_component", "render"))
+    # A residual is only meaningful when prediction and GT use the exact same
+    # calibrated camera. Orbit controls intentionally do not affect this mode.
+    orbit_cam = _make_orbit_camera(base_camera, target, settings, width, height)
+    viewer_cam = base_camera if component == "residual_remaining" else orbit_cam
+
+    def full_render(camera):
+        viewer_xyz = gaussians.get_xyz
+        viewer_dir = viewer_xyz - camera.camera_center
+        viewer_dir = viewer_dir / (viewer_dir.norm(dim=1, keepdim=True) + 1e-6)
+        viewer_normal = gaussians.get_normal_axis(viewer_dir)
+        viewer_spec = None
+        if use_asg:
+            viewer_spec = specular_mlp.step(
+                gaussians.get_asg_features, viewer_dir, viewer_normal
+            )
+        return render_fastgs(
+            camera, gaussians, pipe, background, mult, mlp_color=viewer_spec
+        )["render"]
+
+    full_frame = full_render(viewer_cam)
+    sh_frame = None
+    if component in {"sh_only", "asg_only"} or capture_all:
+        sh_frame = render_fastgs(
+            viewer_cam, gaussians, pipe, background, mult, mlp_color=None
+        )["render"]
+    if component == "sh_only":
+        rgb_frame = sh_frame
+    elif component == "asg_only":
+        rgb_frame = (full_frame - sh_frame).clamp_min(0.0)
+    elif component == "residual_remaining":
+        rgb_frame = (base_camera.original_image[:3].cuda() - full_frame).clamp_min(0.0)
+    else:
+        rgb_frame = full_frame
+    geometry_opacity = torch.full_like(
+        gaussians.get_opacity, float(settings["geometry_opacity"])
+    )
+    geometry_frame = render_fastgs(
+        orbit_cam, gaussians, pipe,
+        torch.tensor([0.015, 0.02, 0.022], device="cuda"), mult,
+        scaling_modifier=float(settings["splat_scale"]),
+        override_color=_geometry_colors(gaussians),
+        opacity_override=geometry_opacity,
+    )["render"]
+    rgb_jpeg = _tensor_to_jpeg(rgb_frame)
+    geometry_jpeg = _tensor_to_jpeg(geometry_frame)
+    captures = None
+    if capture_all:
+        # Timeline RGB/SH/ASG use the orbit pose captured at this iteration.
+        # Residual uses its calibrated dataset pose so prediction and GT align.
+        if viewer_cam is not orbit_cam:
+            orbit_full = full_render(orbit_cam)
+            orbit_sh = render_fastgs(
+                orbit_cam, gaussians, pipe, background, mult, mlp_color=None
+            )["render"]
+        else:
+            orbit_full, orbit_sh = full_frame, sh_frame
+        exact_full = full_frame if viewer_cam is base_camera else full_render(base_camera)
+        residual = (base_camera.original_image[:3].cuda() - exact_full).clamp_min(0.0)
+        captures = {
+            "render": _tensor_to_jpeg(orbit_full),
+            "sh_only": _tensor_to_jpeg(orbit_sh),
+            "asg_only": _tensor_to_jpeg((orbit_full - orbit_sh).clamp_min(0.0)),
+            "residual_remaining": _tensor_to_jpeg(residual),
+            "geometry": geometry_jpeg,
+        }
+    return rgb_jpeg, geometry_jpeg, captures
+
+
+def _write_web_live(live_dir, iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg, phase="training"):
+    for name, encoded in (("rgb", rgb_jpeg), ("geometry", geometry_jpeg)):
+        live_path = os.path.join(live_dir, name + ".jpg")
+        temporary_path = live_path + ".tmp"
+        with open(temporary_path, "wb") as frame_file:
+            frame_file.write(encoded)
+        os.replace(temporary_path, live_path)
+    telemetry_path = os.path.join(live_dir, "telemetry.json")
+    telemetry_tmp = telemetry_path + ".tmp"
+    with open(telemetry_tmp, "w") as telemetry_file:
+        json.dump({
+            "type": "frame", "iteration": iteration,
+            "gaussian_count": gaussian_count,
+            "vram_allocated_mib": round(allocated_mib, 2),
+            "vram_reserved_mib": round(reserved_mib, 2),
+            "phase": phase, "frame_id": time.time_ns(),
+        }, telemetry_file)
+    os.replace(telemetry_tmp, telemetry_path)
+
+
+def _merged_web_settings(web_viewer, settings_path):
+    settings = web_viewer.poll_settings()
+    if os.path.isfile(settings_path):
+        try:
+            with open(settings_path, "r") as settings_file:
+                settings.update(json.load(settings_file))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return settings
 def build_ref_score_confidence(ref_score, opt):
     """
     Keep broad RefScore for densification, but derive a conservative confidence
@@ -247,8 +358,11 @@ def training(dataset, opt, pipe):
     web_viewer = None
     web_stats = []
     web_base_camera = None
+    web_cameras = []
     web_target = None
     web_frames_dir = os.path.join(scene.model_path, "web_viewer_frames")
+    web_live_dir = os.path.join(scene.model_path, "web_viewer_live")
+    web_settings_path = os.path.join(scene.model_path, "web_viewer_settings.json")
     if getattr(opt, "web_viewer", False):
         viewer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web-viewer")
         if viewer_dir not in sys.path:
@@ -260,9 +374,18 @@ def training(dataset, opt, pipe):
             save_frames=opt.web_save_frames,
         )
         web_viewer.start()
-        web_base_camera = scene.getTrainCameras()[randint(0, len(scene.getTrainCameras()) - 1)]
+        web_cameras = scene.getTrainCameras()
+        web_base_camera = web_cameras[0]
         web_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
         os.makedirs(web_frames_dir, exist_ok=True)
+        os.makedirs(web_live_dir, exist_ok=True)
+        with open(os.path.join(scene.model_path, "web_viewer_manifest.json"), "w") as manifest_file:
+            json.dump({
+                "cameras": [
+                    {"index": index, "image_name": camera.image_name}
+                    for index, camera in enumerate(web_cameras)
+                ]
+            }, manifest_file, indent=2)
 
     # ------------------------------------------------------------
     # LOAD REFLECTION PRIORS (If available)
@@ -315,6 +438,19 @@ def training(dataset, opt, pipe):
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
+
+    save_iterations = {int(opt.iterations)}
+    checkpoint_interval = max(0, int(getattr(opt, "checkpoint_interval", 0)))
+    if checkpoint_interval:
+        save_iterations.update(range(checkpoint_interval, opt.iterations + 1,
+                                     checkpoint_interval))
+    checkpoint_text = str(getattr(opt, "checkpoint_iterations", "") or "")
+    for value in checkpoint_text.split(","):
+        if value.strip():
+            checkpoint = int(value.strip())
+            if 1 <= checkpoint <= opt.iterations:
+                save_iterations.add(checkpoint)
+    print("Model checkpoints:", ", ".join(map(str, sorted(save_iterations))))
 
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training")
     ema_loss = 0.0
@@ -590,10 +726,10 @@ def training(dataset, opt, pipe):
         # LIVE VIEWER + PER-ITERATION TELEMETRY
         # --------------------------------------------------------
         if web_viewer is not None:
-            settings = web_viewer.poll_settings()
+            settings = _merged_web_settings(web_viewer, web_settings_path)
             while settings["paused"]:
                 time.sleep(0.05)
-                settings = web_viewer.poll_settings()
+                settings = _merged_web_settings(web_viewer, web_settings_path)
 
             torch.cuda.synchronize()
             allocated_mib = torch.cuda.memory_allocated() / (1024 ** 2)
@@ -607,45 +743,32 @@ def training(dataset, opt, pipe):
             })
 
             interval = max(1, int(settings["interval"]))
-            should_render_web = iteration % interval == 0 and (
-                web_viewer.has_clients() or settings["save_frames"]
-            )
+            record_interval = max(1, int(settings.get("record_interval", 50)))
+            record_due = (bool(settings.get("save_frames", False))
+                          and iteration % record_interval == 0)
+            should_render_web = iteration % interval == 0 or record_due
             if should_render_web:
+                camera_index = max(0, min(
+                    len(web_cameras) - 1, int(settings.get("camera_index", 0))
+                ))
+                web_base_camera = web_cameras[camera_index]
                 with torch.no_grad():
-                    viewer_cam = _make_orbit_camera(
+                    rgb_jpeg, geometry_jpeg, timeline_frames = _render_web_pair(
                         web_base_camera, web_target, settings,
-                        opt.web_width, opt.web_height
+                        opt.web_width, opt.web_height, gaussians,
+                        specular_mlp, pipe, background, opt.mult,
+                        iteration > opt.specular_start_iter,
+                        capture_all=record_due,
                     )
-                    viewer_xyz = gaussians.get_xyz
-                    viewer_dir = viewer_xyz - viewer_cam.camera_center
-                    viewer_dir = viewer_dir / (viewer_dir.norm(dim=1, keepdim=True) + 1e-6)
-                    viewer_normal = gaussians.get_normal_axis(viewer_dir)
-                    viewer_spec = None
-                    if iteration > opt.specular_start_iter:
-                        viewer_spec = specular_mlp.step(
-                            gaussians.get_asg_features, viewer_dir, viewer_normal
-                        )
-                    rgb_frame = render_fastgs(
-                        viewer_cam, gaussians, pipe, background, opt.mult,
-                        mlp_color=viewer_spec
-                    )["render"]
-                    geometry_opacity = torch.full_like(
-                        gaussians.get_opacity, float(settings["geometry_opacity"])
-                    )
-                    geometry_frame = render_fastgs(
-                        viewer_cam, gaussians, pipe,
-                        torch.tensor([0.015, 0.02, 0.022], device="cuda"), opt.mult,
-                        scaling_modifier=float(settings["splat_scale"]),
-                        override_color=_geometry_colors(gaussians),
-                        opacity_override=geometry_opacity,
-                    )["render"]
-                    rgb_jpeg = _tensor_to_jpeg(rgb_frame)
-                    geometry_jpeg = _tensor_to_jpeg(geometry_frame)
 
                 web_viewer.publish(iteration, gaussian_count, allocated_mib,
                                    reserved_mib, rgb_jpeg, geometry_jpeg)
-                if settings["save_frames"]:
-                    for name, encoded in (("rgb", rgb_jpeg), ("geometry", geometry_jpeg)):
+                _write_web_live(
+                    web_live_dir, iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg,
+                )
+                if record_due and timeline_frames:
+                    for name, encoded in timeline_frames.items():
                         folder = os.path.join(web_frames_dir, name)
                         os.makedirs(folder, exist_ok=True)
                         with open(os.path.join(folder, f"{iteration:06d}.jpg"), "wb") as frame_file:
@@ -662,7 +785,7 @@ def training(dataset, opt, pipe):
         # SAVE
         # --------------------------------------------------------
 
-        if iteration in [17000, opt.iterations]:
+        if iteration in save_iterations:
             print(f"[ITER {iteration}] Saving...")
             scene.save(iteration)
 
@@ -694,6 +817,8 @@ def training(dataset, opt, pipe):
         "git_branch": get_git_branch(),
         "image_scale": dataset.images,
         "iterations": opt.iterations,
+        "saved_checkpoints": sorted(save_iterations),
+        "checkpoint_interval": checkpoint_interval,
         "initial_gaussians": initial_gaussians,
         "final_gaussians": gaussians.get_xyz.shape[0],
         "gaussian_heatmap_dir": os.path.relpath(heatmap_path, dataset.model_path) if heatmap_path else None,
@@ -755,6 +880,127 @@ def training(dataset, opt, pipe):
         json.dump(metadata, f, indent=4)
 
     print(f"Training metadata saved to {info_path}")
+
+    # ------------------------------------------------------------
+    # AUTOMATIC TEST RENDER + METRICS
+    # ------------------------------------------------------------
+    evaluation_status_path = os.path.join(scene.model_path, "evaluation_status.json")
+
+    def write_evaluation_status(status, phase, detail=""):
+        temporary = evaluation_status_path + ".tmp"
+        with open(temporary, "w") as status_file:
+            json.dump({"status": status, "phase": phase, "detail": detail,
+                       "iteration": opt.iterations}, status_file, indent=2)
+        os.replace(temporary, evaluation_status_path)
+
+    test_cameras = scene.getTestCameras()
+    if web_viewer is not None and test_cameras:
+        try:
+            write_evaluation_status("running", "Rendering test views",
+                                    f"0 / {len(test_cameras)} views")
+            print(f"Automatic evaluation: rendering {len(test_cameras)} test views...")
+            from render import render_set, save_fps_to_results
+            test_fps = render_set(
+                scene.model_path, "test", opt.iterations, test_cameras,
+                gaussians, pipe, background, specular_mlp, opt
+            )
+            save_fps_to_results(scene.model_path, opt.iterations, test_fps)
+            write_evaluation_status("running", "Computing metrics",
+                                    "PSNR · SSIM · LPIPS · specular diagnostics")
+            from metrics import evaluate
+            evaluate([scene.model_path])
+            results_path = os.path.join(scene.model_path, "results.json")
+            if not os.path.isfile(results_path):
+                raise RuntimeError("metrics.py did not produce results.json")
+            with open(results_path, "r") as results_file:
+                evaluation_results = json.load(results_file)
+            method_results = evaluation_results.get(f"ours_{opt.iterations}", {})
+            if not all(name in method_results for name in ("PSNR", "SSIM", "LPIPS")):
+                raise RuntimeError("metrics.py did not produce PSNR/SSIM/LPIPS")
+            write_evaluation_status("complete", "Evaluation complete",
+                                    f"{len(test_cameras)} test views")
+            print("Automatic evaluation complete.")
+        except Exception as evaluation_error:
+            write_evaluation_status("failed", "Evaluation failed",
+                                    str(evaluation_error))
+            print("Automatic evaluation failed:", evaluation_error)
+    elif web_viewer is not None:
+        write_evaluation_status(
+            "skipped", "Evaluation skipped",
+            "No test cameras. Enable Evaluation split before starting training."
+        )
+
+    # Keep the CUDA scene alive as an interactive final-result viewer.  The
+    # persistent launcher can still terminate this process with its Stop button.
+    if web_viewer is not None:
+        print("Training complete. Final web viewer remains interactive; use Stop to close it.")
+        final_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+        current_view_iteration = opt.iterations
+        last_view_signature = None
+        while True:
+            settings = _merged_web_settings(web_viewer, web_settings_path)
+            if settings.get("close_viewer", False):
+                break
+            camera_index = max(0, min(
+                len(web_cameras) - 1, int(settings.get("camera_index", 0))
+            ))
+            requested_iteration = int(settings.get("checkpoint_iteration", -1))
+            if requested_iteration < 0:
+                requested_iteration = opt.iterations
+            if requested_iteration != current_view_iteration:
+                point_dir = os.path.join(
+                    scene.model_path, "point_cloud", f"iteration_{requested_iteration}"
+                )
+                spec_dir = os.path.join(
+                    scene.model_path, "specular", f"iteration_{requested_iteration}"
+                )
+                ply_path = os.path.join(point_dir, "point_cloud.ply")
+                asg_path = os.path.join(point_dir, "asg.pt")
+                spec_path = os.path.join(spec_dir, "specular.pth")
+                if all(os.path.isfile(path) for path in (ply_path, asg_path, spec_path)):
+                    gaussians.load_ply(ply_path)
+                    gaussians._features_asg = torch.load(
+                        asg_path, map_location="cuda"
+                    ).cuda()
+                    specular_mlp.load_weights(
+                        scene.model_path, iteration=requested_iteration
+                    )
+                    current_view_iteration = requested_iteration
+                    final_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+                    last_view_signature = None
+                else:
+                    requested_iteration = current_view_iteration
+            signature = (
+                requested_iteration, str(settings.get("rgb_component", "render")),
+                camera_index, float(settings.get("yaw", 0.0)),
+                float(settings.get("pitch", 0.0)), float(settings.get("roll", 0.0)),
+                float(settings.get("zoom", 1.0)), float(settings.get("fov_scale", 1.2)),
+                float(settings.get("splat_scale", 1.35)),
+                float(settings.get("geometry_opacity", 0.72)),
+            )
+            if signature != last_view_signature:
+                web_base_camera = web_cameras[camera_index]
+                torch.cuda.synchronize()
+                allocated_mib = torch.cuda.memory_allocated() / (1024 ** 2)
+                reserved_mib = torch.cuda.memory_reserved() / (1024 ** 2)
+                gaussian_count = int(gaussians.get_xyz.shape[0])
+                with torch.no_grad():
+                    rgb_jpeg, geometry_jpeg, _ = _render_web_pair(
+                        web_base_camera, final_target, settings,
+                        opt.web_width, opt.web_height, gaussians,
+                        specular_mlp, pipe, background, opt.mult,
+                        current_view_iteration > opt.specular_start_iter,
+                    )
+                web_viewer.publish(
+                    current_view_iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg,
+                )
+                _write_web_live(
+                    web_live_dir, current_view_iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg, phase="final",
+                )
+                last_view_signature = signature
+            time.sleep(0.05)
 
 # ============================================================
 # UTILS

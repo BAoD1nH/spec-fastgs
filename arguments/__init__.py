@@ -101,6 +101,8 @@ class OptimizationParams(ParamGroup):
         self.web_width = 960
         self.web_height = 540
         self.web_save_frames = False
+        self.checkpoint_interval = 0
+        self.checkpoint_iterations = ""
 
         #Learning Rate Cho Gaussian Position (xyz)
         self.position_lr_init = 0.00016

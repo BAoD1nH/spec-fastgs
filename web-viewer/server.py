@@ -25,13 +25,19 @@ class ViewerServer:
             "enabled": True,
             "paused": False,
             "interval": 10,
+            "record_interval": 50,
             "yaw": 0.0,
             "pitch": 0.0,
+            "roll": 0.0,
             "zoom": 1.0,
+            "camera_index": 0,
             "fov_scale": 1.2,
             "splat_scale": 1.35,
             "geometry_opacity": 0.72,
+            "rgb_component": "render",
+            "checkpoint_iteration": -1,
             "save_frames": False,
+            "close_viewer": False,
         }
         self._clients = set()
         self._loop = None
