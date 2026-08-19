@@ -22,6 +22,7 @@ class Camera(nn.Module):
         gt_alpha_mask,
         image_name,
         uid,
+        image_path=None,
         trans=np.array([0.0, 0.0, 0.0]),
         scale=1.0,
         data_device="cuda",
@@ -36,6 +37,9 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        # Keep the original file path so offline priors can read the RGBA
+        # source instead of the already composited RGB training image.
+        self.image_path = image_path
 
         # --------------------------------------------------------
         # DEVICE
@@ -84,7 +88,7 @@ class Camera(nn.Module):
 
         self.world_view_transform = torch.tensor(
             getWorld2View2(R, T, trans, scale)
-        ).transpose(0, 1).to(self.data_device)
+        ).transpose(0, 1).cuda()
 
         self.projection_matrix = (
             getProjectionMatrix(
@@ -94,7 +98,7 @@ class Camera(nn.Module):
                 fovY=self.FoVy
             )
             .transpose(0, 1)
-            .to(self.data_device)
+            .cuda()
         )
 
         self.full_proj_transform = (
@@ -113,7 +117,7 @@ class Camera(nn.Module):
     def reset_extrinsic(self, R, T):
         self.world_view_transform = torch.tensor(
             getWorld2View2(R, T, self.trans, self.scale)
-        ).transpose(0, 1).to(self.data_device)
+        ).transpose(0, 1).cuda()
 
         self.full_proj_transform = (
             self.world_view_transform.unsqueeze(0)
@@ -155,4 +159,3 @@ class MiniCam:
 
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-

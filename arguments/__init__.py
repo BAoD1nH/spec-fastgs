@@ -137,6 +137,9 @@ class OptimizationParams(ParamGroup):
         self.refscore_min_strength = 0.15
         self.refscore_threshold_min = 0.5 #Ngưỡng chọn vùng ref-score [min, max]
         self.refscore_threshold_max = 0.9
+        # Reflection evidence softly reweights reconstruction error. It must
+        # not independently turn a bright pixel into a densification target.
+        self.refscore_strength = 0.5
 
         self.refscore_conf_quantile = 0.85
         self.refscore_conf_gamma = 1.5
@@ -168,10 +171,10 @@ class OptimizationParams(ParamGroup):
         
         # Representation Capacity / Role Separation
         self.use_sh_spec_mask = False #giảm vai trò SH ở vùng specular để ASG học?
-        self.sh_spec_mask_threshold = 0.7
-        self.sh_spec_grad_scale = 0.0
-        self.sh_spec_mask_start = 3000 #ASG bắt đầu tham gia vào vùng specular từ iter này
-        self.sh_spec_min_metric_count = 1
+        self.sh_spec_mask_threshold = 0.85
+        self.sh_spec_grad_scale = 0.9
+        self.sh_spec_mask_start = 8000 #Chỉ phân vai sau khi SH/geometry đã tương đối ổn định
+        self.sh_spec_min_metric_count = 2
 
         # Supervision Signal
         self.lambda_spec_l1_weight = 0.0
@@ -192,8 +195,8 @@ class OptimizationParams(ParamGroup):
         self.use_adaptive_prior = False #Cập nhật prior động theo residual trong lúc train?
         self.adaptive_prior_start = 5000 #Bắt đầu cập nhật prior động
         self.adaptive_prior_interval = 3000
-        self.adaptive_prior_num_cameras = 20
-        self.adaptive_prior_ema = 0.7
+        self.adaptive_prior_num_cameras = 10
+        self.adaptive_prior_ema = 0.8
         
         super().__init__(parser, "Optimization Parameters")
 

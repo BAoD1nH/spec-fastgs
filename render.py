@@ -95,7 +95,9 @@ def render_set(
         )
 
         rendering = render_pkg["render"]
-        gt = view.original_image[0:3, :, :]
+        # Images may intentionally live on CPU to reduce VRAM. Move only the
+        # current GT frame for diagnostics; this stays outside the FPS timing.
+        gt = view.original_image[0:3, :, :].to(rendering.device)
 
         # --------------------------------------------------------
         # SAVE DIAGNOSTIC RENDERS (Academic Standard - No Scaling)

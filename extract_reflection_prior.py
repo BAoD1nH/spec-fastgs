@@ -6,6 +6,7 @@ import os
 import time
 import imageio
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 from argparse import ArgumentParser
 
@@ -151,10 +152,20 @@ def extract_priors(dataset, args):
 
     for cam in progress_bar:
         ref_image_name = cam.image_name
-        
-        # original_image is [3, H, W] in [0, 1]
-        img_tensor = cam.original_image.permute(1, 2, 0)
-        img01 = img_tensor.cpu().numpy()
+
+        # Read the source RGBA image, not Camera.original_image. Synthetic
+        # images have already been composited onto white/black by the scene
+        # loader, which would make a white background look perfectly
+        # specular to Tan-Ikeuchi. Alpha is therefore part of the prior.
+        image_path = getattr(cam, "image_path", None)
+        if image_path and os.path.isfile(image_path):
+            rgba = np.asarray(Image.open(image_path).convert("RGBA"), dtype=np.float32) / 255.0
+            img01 = rgba[..., :3]
+            foreground_alpha = rgba[..., 3]
+        else:
+            img_tensor = cam.original_image.permute(1, 2, 0)
+            img01 = img_tensor.detach().cpu().numpy()
+            foreground_alpha = np.ones(img01.shape[:2], dtype=np.float32)
         
         if args.ref_prior_method == "tan":
             final_score = tan_ikeuchi_score(
@@ -178,6 +189,10 @@ def extract_priors(dataset, args):
             )
         else:
             raise ValueError(f"Unknown ref_prior_method: {args.ref_prior_method}")
+
+        # Background must never become reflection evidence. This also keeps
+        # the prior independent of the white/black training background.
+        final_score = final_score * foreground_alpha
 
         ref_score = _normalize_score(final_score)
         ref_conf = postprocess_score(

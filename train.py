@@ -20,7 +20,7 @@ from scene.cameras import MiniCam
 from utils.graphics_utils import getProjectionMatrix
 
 from utils.general_utils import safe_state
-from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
+from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras, prior_to_cuda
 from utils.gaussian_heatmap import save_gaussian_view_heatmaps
 
 from argparse import ArgumentParser, Namespace
@@ -224,7 +224,7 @@ def build_ref_score_confidence(ref_score, opt):
     Keep broad RefScore for densification, but derive a conservative confidence
     map for supervision/masking where false positives are more damaging.
     """
-    conf = ref_score.detach().float().clamp(0.0, 1.0)
+    conf = prior_to_cuda(ref_score).detach().float().clamp(0.0, 1.0)
     if conf.numel() == 0 or conf.max() <= 0:
         return conf
 
@@ -250,9 +250,9 @@ def build_ref_score_confidence(ref_score, opt):
 
 def get_ref_score_confidence(cam, opt):
     if hasattr(cam, "ref_score_conf"):
-        return cam.ref_score_conf.cuda()
+        return prior_to_cuda(cam.ref_score_conf)
     if hasattr(cam, "ref_score"):
-        return build_ref_score_confidence(cam.ref_score.cuda(), opt)
+        return build_ref_score_confidence(cam.ref_score, opt)
     return None
 
 
@@ -291,23 +291,28 @@ def update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteratio
             robust_max = torch.quantile(residual.flatten(), 0.95)
             residual_norm = (residual / (robust_max + 1e-6)).clamp(0.0, 1.0)
 
-            adaptive = residual_norm * cam.ref_score_static
+            static_score = prior_to_cuda(cam.ref_score_static)
+            current_score = prior_to_cuda(cam.ref_score)
+            adaptive = residual_norm * static_score
             adaptive_max = adaptive.max()
             if adaptive_max > 0:
                 adaptive = adaptive / (adaptive_max + 1e-6)
 
             alpha = opt.adaptive_prior_ema
-            cam.ref_score = (alpha * cam.ref_score + (1.0 - alpha) * adaptive).detach()
+            updated_score = alpha * current_score + (1.0 - alpha) * adaptive
+            cam.ref_score = (updated_score.clamp(0.0, 1.0) * 255.0).byte().cpu()
             if hasattr(cam, "ref_score_conf_static"):
-                adaptive_conf = residual_norm * cam.ref_score_conf_static
+                static_conf = prior_to_cuda(cam.ref_score_conf_static)
+                current_conf = prior_to_cuda(cam.ref_score_conf)
+                adaptive_conf = residual_norm * static_conf
                 adaptive_conf_max = adaptive_conf.max()
                 if adaptive_conf_max > 0:
                     adaptive_conf = adaptive_conf / (adaptive_conf_max + 1e-6)
-                cam.ref_score_conf = (
-                    alpha * cam.ref_score_conf + (1.0 - alpha) * adaptive_conf
-                ).detach()
+                updated_conf = alpha * current_conf + (1.0 - alpha) * adaptive_conf
+                cam.ref_score_conf = (updated_conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
             else:
-                cam.ref_score_conf = build_ref_score_confidence(cam.ref_score, opt)
+                conf = build_ref_score_confidence(cam.ref_score, opt)
+                cam.ref_score_conf = (conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
             updated += 1
 
     if updated:
@@ -396,15 +401,15 @@ def training(dataset, opt, pipe):
         prior_img = imageio.imread(path)
         if len(prior_img.shape) == 3:
             prior_img = prior_img[..., 0]
-        prior_tensor = torch.tensor(prior_img / 255.0, dtype=torch.float32).cuda()
+        prior_tensor = torch.as_tensor(prior_img, dtype=torch.uint8, device="cpu")
         if prior_tensor.shape[0] != cam.image_height or prior_tensor.shape[1] != cam.image_width:
             prior_tensor = torch.nn.functional.interpolate(
-                prior_tensor.unsqueeze(0).unsqueeze(0),
+                prior_tensor.float().unsqueeze(0).unsqueeze(0),
                 size=(cam.image_height, cam.image_width),
                 mode='bilinear',
                 align_corners=False
-            ).squeeze()
-        return prior_tensor
+            ).squeeze().round().clamp(0, 255).byte()
+        return prior_tensor.contiguous()
 
     if opt.use_ref_score and os.path.exists(ref_prior_dir):
         print("Loading Reflection Priors...")
@@ -419,13 +424,15 @@ def training(dataset, opt, pipe):
                     cam.ref_score_static = ref_tensor.clone()
                     conf_path = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_conf.png")
                     if os.path.exists(conf_path):
-                        cam.ref_score_conf = load_prior_tensor(conf_path, cam).clamp(0.0, 1.0)
+                        cam.ref_score_conf = load_prior_tensor(conf_path, cam)
                     else:
-                        cam.ref_score_conf = build_ref_score_confidence(ref_tensor, opt)
+                        conf = build_ref_score_confidence(ref_tensor, opt)
+                        cam.ref_score_conf = (conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
                     cam.ref_score_conf_static = cam.ref_score_conf.clone()
                     loaded_ref_priors += 1
-                except Exception:
-                    pass
+                except Exception as error:
+                    missing_ref_priors += 1
+                    print(f"[Reflection Prior] Failed to load {npath}: {error}")
             else:
                 missing_ref_priors += 1
         print(f"Loaded {loaded_ref_priors} reflection priors; missing {missing_ref_priors}.")
@@ -843,6 +850,7 @@ def training(dataset, opt, pipe):
         "refscore_min_strength": opt.refscore_min_strength,
         "refscore_threshold_min": opt.refscore_threshold_min,
         "refscore_threshold_max": opt.refscore_threshold_max,
+        "refscore_strength": opt.refscore_strength,
         "refscore_conf_quantile": opt.refscore_conf_quantile,
         "refscore_conf_gamma": opt.refscore_conf_gamma,
         "refscore_conf_min": opt.refscore_conf_min,
