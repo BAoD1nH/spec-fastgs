@@ -35,6 +35,9 @@ def render_set(
     specular_mlp,
     args
 ):
+    use_asg = bool(getattr(args, "use_asg", True))
+    use_compact_box = bool(getattr(args, "use_compact_box", True))
+    render_mult = args.mult if use_compact_box else 1.0
 
     render_path = os.path.join(model_path, name, f"ours_{iteration}", "renders")
     gts_path = os.path.join(model_path, name, f"ours_{iteration}", "gt")
@@ -62,11 +65,13 @@ def render_set(
         # SPECULAR
         # --------------------------------------------------------
 
-        mlp_color = specular_mlp.step(
-            gaussians.get_asg_features.to("cuda"),
-            viewdir,
-            normal
-        )
+        mlp_color = None
+        if use_asg:
+            mlp_color = specular_mlp.step(
+                gaussians.get_asg_features.to("cuda"),
+                viewdir,
+                normal
+            )
 
         # --------------------------------------------------------
         # DEBUG VISUALIZATIONS (SH-only, specular diagnostics)
@@ -79,22 +84,25 @@ def render_set(
             gaussians,
             pipeline,
             background,
-            args.mult,
+            render_mult,
             mlp_color=None
         )
         sh_image = sh_pkg["render"]
 
-        # Full render (SH + specular)
-        render_pkg = render_fastgs(
-            view,
-            gaussians,
-            pipeline,
-            background,
-            args.mult,
-            mlp_color=mlp_color
-        )
-
-        rendering = render_pkg["render"]
+        # SH-only uses this image as the final output; SH+ASG performs the
+        # additional full render needed for decomposition diagnostics.
+        if use_asg:
+            render_pkg = render_fastgs(
+                view,
+                gaussians,
+                pipeline,
+                background,
+                render_mult,
+                mlp_color=mlp_color
+            )
+            rendering = render_pkg["render"]
+        else:
+            rendering = sh_image
         # Images may intentionally live on CPU to reduce VRAM. Move only the
         # current GT frame for diagnostics; this stays outside the FPS timing.
         gt = view.original_image[0:3, :, :].to(rendering.device)
@@ -115,12 +123,13 @@ def render_set(
             os.path.join(spec_path, f"{idx:05d}_only_sh.png")
         )
 
-        # 3) only_asg.png: Render(Full) - Render(SH)
-        spec_image = torch.clamp(rendering - sh_image, min=0.0)
-        torchvision.utils.save_image(
-            spec_image,
-            os.path.join(spec_path, f"{idx:05d}_only_asg.png")
-        )
+        # 3) only_asg.png exists only for a model that actually uses ASG.
+        if use_asg:
+            spec_image = torch.clamp(rendering - sh_image, min=0.0)
+            torchvision.utils.save_image(
+                spec_image,
+                os.path.join(spec_path, f"{idx:05d}_only_asg.png")
+            )
 
         # 4) residual_real.png: clamp(GT - SH, min=0)
         residual_real = torch.clamp(gt - sh_image, min=0.0)
@@ -164,22 +173,24 @@ def render_set(
         torch.cuda.synchronize()
         start_time = time.perf_counter()
 
-        xyz = gaussians.get_xyz
-        cam_center = view.camera_center.to("cuda")
-        viewdir = xyz - cam_center
-        viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
-        normal = gaussians.get_normal_axis(viewdir).to("cuda")
-        mlp_color = specular_mlp.step(
-            gaussians.get_asg_features.to("cuda"),
-            viewdir,
-            normal
-        )
+        mlp_color = None
+        if use_asg:
+            xyz = gaussians.get_xyz
+            cam_center = view.camera_center.to("cuda")
+            viewdir = xyz - cam_center
+            viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+            normal = gaussians.get_normal_axis(viewdir).to("cuda")
+            mlp_color = specular_mlp.step(
+                gaussians.get_asg_features.to("cuda"),
+                viewdir,
+                normal
+            )
         render_fastgs(
             view,
             gaussians,
             pipeline,
             background,
-            args.mult,
+            render_mult,
             mlp_color=mlp_color
         )
 
@@ -193,8 +204,9 @@ def render_set(
     avg_time = sum(timed_frames) / num_frames if num_frames > 0 else 0.0
     fps = 1.0 / avg_time if avg_time > 0 else 0.0
 
+    architecture = "SH+ASG" if use_asg else "SH-only"
     print(
-        f"[{name}] {num_frames} timed frames | "
+        f"[{name}] {architecture} | {num_frames} timed frames | "
         f"end-to-end FPS: {fps:.2f} ({avg_time * 1000.0:.3f} ms/frame)"
     )
     return fps
@@ -237,12 +249,24 @@ def render_sets(
         # LOAD MODELS
         # --------------------------------------------------------
 
-        gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree)
+        use_asg = bool(getattr(dataset, "use_asg", True))
+        args.use_asg = use_asg
+        args.use_compact_box = bool(getattr(dataset, "use_compact_box", True))
+        print(f"[SH-ASG Ablation] use_asg={use_asg}")
+        print(
+            "[FastGS Ablation] "
+            f"CompactBox={args.use_compact_box}, "
+            f"beta={args.mult if args.use_compact_box else 1.0}"
+        )
+        gaussians = GaussianModel(
+            dataset.sh_degree,
+            dataset.asg_degree if use_asg else 0,
+        )
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
 
         specular_mlp = None
-        if not args.only_heatmap:
+        if use_asg and not args.only_heatmap:
             # ✅ LOAD ASG FEATURE
             asg_path = os.path.join(
                 dataset.model_path,
@@ -314,7 +338,8 @@ def render_sets(
                 scene.model_path,
                 scene.loaded_iter,
                 render_fastgs,
-                (pipeline, background, args.mult),
+                (pipeline, background,
+                 args.mult if args.use_compact_box else 1.0),
             )
             print(f"Saved Gaussian distribution heatmaps to {heatmap_path}")
 

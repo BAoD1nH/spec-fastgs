@@ -155,7 +155,7 @@ class Scene:
     # SAVE
     # ------------------------------------------------------------
 
-    def save(self, iteration):
+    def save(self, iteration, save_asg=True):
         path = os.path.join(
             self.model_path,
             f"point_cloud/iteration_{iteration}"
@@ -165,10 +165,11 @@ class Scene:
             os.path.join(path, "point_cloud.ply")
         )
 
-        torch.save(
-            self.gaussians.get_asg_features.detach().cpu(),
-            os.path.join(path, "asg.pt")
-        )
+        if save_asg:
+            torch.save(
+                self.gaussians.get_asg_features.detach().cpu(),
+                os.path.join(path, "asg.pt")
+            )
     # ------------------------------------------------------------
     # GET CAMERAS
     # ------------------------------------------------------------

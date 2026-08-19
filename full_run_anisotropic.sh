@@ -19,16 +19,12 @@ python train.py \
     --densification_interval 500 \
     --densification_refscore_interval 500 \
     --num_score_cameras 10 \
-    --refscore_strength 0.75 \
     --optimizer_type default \
     --use_ref_score \
     --use_adaptive_prior \
-    --adaptive_prior_floor 1.0 \
-    --adaptive_prior_ceiling 1.0 \
-    --adaptive_loss_strength 0.15 \
     --use_reflection_view_sampling \
-    --reflection_sampling_ratio 0.15 \
-    --reflection_sampling_temperature 1.0
+    --disable_multiview_contribution
+
 
 python render.py -s datasets/Anisotropic-Synthesis/teapot -m output/anisotropic_synthetic/teapot --iteration 30000 --skip_train --data_device cpu
 

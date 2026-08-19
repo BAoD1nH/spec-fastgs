@@ -55,6 +55,7 @@ class GaussianModel:
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
         self.asg_degree = asg_degree
+        self.asg_enabled = True
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -316,7 +317,7 @@ class GaussianModel:
         ''' An optimization scheduler. The goal is similar to the sparse Adam of taming 3dgs.'''
         self._apply_f_rest_grad_mask(f_rest_grad_mask, f_rest_grad_scale)
 
-        if getattr(self, 'asg_optimizer', None) is not None:
+        if self.asg_enabled and getattr(self, 'asg_optimizer', None) is not None:
             self.asg_optimizer.step()
             self.asg_optimizer.zero_grad(set_to_none = True)
 
@@ -620,6 +621,80 @@ class GaussianModel:
             new_rotation,
             new_tmp_radii,
         )
+
+    def densify_and_split_baseline(self, grads, grad_threshold, scene_extent, N=2):
+        """Vanilla 3DGS split used by the VCD-off ablation."""
+        n_init_points = self.get_xyz.shape[0]
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[:grads.shape[0]] = grads.squeeze()
+        selected_pts_mask = padded_grad >= grad_threshold
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
+        )
+
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        means = torch.zeros((stds.size(0), 3), device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        new_xyz = (torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+                   + self.get_xyz[selected_pts_mask].repeat(N, 1))
+        new_scaling = self.scaling_inverse_activation(
+            self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+        )
+        self.densification_postfix(
+            new_xyz,
+            self._features_dc[selected_pts_mask].repeat(N, 1, 1),
+            self._features_rest[selected_pts_mask].repeat(N, 1, 1),
+            self._features_asg[selected_pts_mask].repeat(N, 1),
+            self._opacity[selected_pts_mask].repeat(N, 1),
+            new_scaling,
+            self._rotation[selected_pts_mask].repeat(N, 1),
+            self.tmp_radii[selected_pts_mask].repeat(N),
+        )
+        prune_filter = torch.cat((
+            selected_pts_mask,
+            torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)
+        ))
+        self.prune_points(prune_filter)
+
+    def densify_and_clone_baseline(self, grads, grad_threshold, scene_extent):
+        """Vanilla 3DGS clone used by the VCD-off ablation."""
+        selected_pts_mask = torch.norm(grads, dim=-1) >= grad_threshold
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent
+        )
+        self.densification_postfix(
+            self._xyz[selected_pts_mask],
+            self._features_dc[selected_pts_mask],
+            self._features_rest[selected_pts_mask],
+            self._features_asg[selected_pts_mask],
+            self._opacity[selected_pts_mask],
+            self._scaling[selected_pts_mask],
+            self._rotation[selected_pts_mask],
+            self.tmp_radii[selected_pts_mask],
+        )
+
+    def densify_and_prune_baseline(self, max_grad, min_opacity, extent,
+                                   max_screen_size, radii):
+        """Vanilla gradient ADC and opacity/size pruning, without VCD score."""
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        self.tmp_radii = radii
+        self.densify_and_clone_baseline(grads, max_grad, extent)
+        self.densify_and_split_baseline(grads, max_grad, extent)
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(
+                torch.logical_or(prune_mask, big_points_vs), big_points_ws
+            )
+        self.prune_points(prune_mask)
+        self.tmp_radii = None
+        torch.cuda.empty_cache()
 
     def densify_and_prune_fastgs(self, max_screen_size, min_opacity, extent, radii, args, importance_score = None, pruning_score = None):
         

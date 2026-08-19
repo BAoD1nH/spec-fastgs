@@ -67,26 +67,20 @@ def masked_psnr(pred, gt, mask):
 def computeAuxMetrics(render, gt, spec_images):
     only_asg = spec_images.get("only_asg")
     residual_real = spec_images.get("residual_real")
-    if only_asg is None or residual_real is None:
+    if residual_real is None:
         return {}
 
     # Residual-derived mask approximates specular regions in rendered test views.
     residual_gray = residual_real.mean(dim=1, keepdim=True)
-    asg_gray = only_asg.mean(dim=1, keepdim=True)
     spec_mask = residual_gray > 0.02
     non_spec_mask = ~spec_mask
-    asg_mask = asg_gray > 0.02
 
     aux = {
         "Spec_L1": None,
         "Spec_PSNR": None,
         "NonSpec_L1": None,
         "NonSpec_PSNR": None,
-        "ASG_Mean": only_asg.mean(),
-        "ASG_Max": only_asg.max(),
         "Residual_Mean": residual_real.mean(),
-        "ASG_Energy_In_Residual": None,
-        "ASG_Residual_IoU": None,
     }
 
     aux["Spec_L1"] = masked_l1(render, gt, spec_mask)
@@ -94,13 +88,21 @@ def computeAuxMetrics(render, gt, spec_images):
     aux["NonSpec_L1"] = masked_l1(render, gt, non_spec_mask)
     aux["NonSpec_PSNR"] = masked_psnr(render, gt, non_spec_mask)
 
-    asg_energy = only_asg.sum()
-    if asg_energy > 0:
-        aux["ASG_Energy_In_Residual"] = only_asg[spec_mask.expand_as(only_asg)].sum() / asg_energy
-
-    union = torch.logical_or(asg_mask, spec_mask).sum()
-    if union > 0:
-        aux["ASG_Residual_IoU"] = torch.logical_and(asg_mask, spec_mask).sum().float() / union.float()
+    if only_asg is not None:
+        asg_gray = only_asg.mean(dim=1, keepdim=True)
+        asg_mask = asg_gray > 0.02
+        aux["ASG_Mean"] = only_asg.mean()
+        aux["ASG_Max"] = only_asg.max()
+        asg_energy = only_asg.sum()
+        if asg_energy > 0:
+            aux["ASG_Energy_In_Residual"] = (
+                only_asg[spec_mask.expand_as(only_asg)].sum() / asg_energy
+            )
+        union = torch.logical_or(asg_mask, spec_mask).sum()
+        if union > 0:
+            aux["ASG_Residual_IoU"] = (
+                torch.logical_and(asg_mask, spec_mask).sum().float() / union.float()
+            )
 
     return aux
 

@@ -397,9 +397,11 @@ def update_adaptive_ref_scores(cameras, gaussians, specular_mlp, pipe,
             viewdir = xyz - cam.camera_center
             viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
             normal = gaussians.get_normal_axis(viewdir)
-            mlp_color = specular_mlp.step(
-                gaussians.get_asg_features, viewdir, normal.detach()
-            )
+            mlp_color = None
+            if specular_mlp is not None:
+                mlp_color = specular_mlp.step(
+                    gaussians.get_asg_features, viewdir, normal.detach()
+                )
             render_img = render_fastgs(
                 cam,
                 gaussians,
@@ -447,22 +449,40 @@ def training(dataset, opt, pipe):
     # INIT MODELS
     # ------------------------------------------------------------
 
-    gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree, opt.optimizer_type)
+    use_asg = bool(getattr(dataset, "use_asg", True))
+    print(f"[SH-ASG Ablation] use_asg={use_asg}")
+    use_vcd = bool(getattr(dataset, "use_vcd", True))
+    use_vcp = bool(getattr(dataset, "use_vcp", True))
+    use_compact_box = bool(getattr(dataset, "use_compact_box", True))
+    # beta=0.5 is FastGS Compact Box. beta=1.0 removes its support shrinkage
+    # while retaining the same rasterizer, which isolates the intended ablation.
+    opt.mult = opt.mult if use_compact_box else 1.0
+    print(
+        "[FastGS Ablation] "
+        f"VCD={use_vcd}, VCP={use_vcp}, CompactBox={use_compact_box}, beta={opt.mult}"
+    )
+    gaussians = GaussianModel(
+        dataset.sh_degree,
+        dataset.asg_degree if use_asg else 0,
+        opt.optimizer_type,
+    )
+    gaussians.asg_enabled = use_asg
     scene = Scene(dataset, gaussians)
     initial_gaussians = gaussians.get_xyz.shape[0]
     configure_refscore_budget(opt, initial_gaussians)
     gaussians.training_setup(opt)
-
-    specular_mlp = SpecularModel(
-        dataset.asg_degree,
-        dataset.is_real,
-        dataset.is_indoor,
-        getattr(dataset, "asg_num_theta", -1),
-        getattr(dataset, "asg_num_phi", -1),
-        getattr(dataset, "specular_hidden", -1),
-        getattr(dataset, "specular_layers", -1),
-    )
-    specular_mlp.train_setting(opt)
+    specular_mlp = None
+    if use_asg:
+        specular_mlp = SpecularModel(
+            dataset.asg_degree,
+            dataset.is_real,
+            dataset.is_indoor,
+            getattr(dataset, "asg_num_theta", -1),
+            getattr(dataset, "asg_num_phi", -1),
+            getattr(dataset, "specular_hidden", -1),
+            getattr(dataset, "specular_layers", -1),
+        )
+        specular_mlp.train_setting(opt)
 
     # ------------------------------------------------------------
     # BG
@@ -643,7 +663,7 @@ def training(dataset, opt, pipe):
         vis_indices: torch.Tensor | None = None   # indices of evaluated Gaussians
         mlp_color: torch.Tensor | None = None     # full-scene buffer  [N, 3]
 
-        if iteration > opt.specular_start_iter:
+        if use_asg and iteration > opt.specular_start_iter:
             n_gs = gaussians.get_xyz.shape[0]
             asg_feat = gaussians.get_asg_features  # [N, asg_degree]
             force_full_asg = (
@@ -773,8 +793,9 @@ def training(dataset, opt, pipe):
         )
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
-        specular_mlp.update_learning_rate(iteration)
-        specular_mlp.optimizer_step()
+        if use_asg:
+            specular_mlp.update_learning_rate(iteration)
+            specular_mlp.optimizer_step()
 
         # --------------------------------------------------------
         # LOG
@@ -816,51 +837,55 @@ def training(dataset, opt, pipe):
                 iteration % opt.densification_interval == 0
             ):
                 size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                score_camera_count = opt.num_score_cameras
-                if getattr(opt, "use_adaptive_prior", False):
-                    score_camera_count = getattr(
-                        opt, "adaptive_prior_num_cameras", score_camera_count
-                    )
-                camlist = sampling_cameras(
-                    scene.getTrainCameras().copy(), score_camera_count
-                )
-
-                # Adaptive Loss reuses the ordinary training render and keeps
-                # static RefScore for geometry, so it needs no extra render here.
-                # Only reproduce the legacy coverage ablation when explicitly
-                # requested through non-unit modulation bounds.
-                adaptive_coverage_enabled = (
-                    getattr(opt, "use_adaptive_prior", False)
-                    and (
-                        abs(float(getattr(opt, "adaptive_prior_floor", 1.0)) - 1.0) > 1e-8
-                        or abs(float(getattr(opt, "adaptive_prior_ceiling", 1.0)) - 1.0) > 1e-8
-                    )
-                )
-                with torch.no_grad():
-                    if adaptive_coverage_enabled:
-                        update_adaptive_ref_scores(
-                            camlist, gaussians, specular_mlp, pipe, background,
-                            opt, iteration
+                if use_vcd:
+                    score_camera_count = opt.num_score_cameras
+                    if getattr(opt, "use_adaptive_prior", False):
+                        score_camera_count = getattr(
+                            opt, "adaptive_prior_num_cameras", score_camera_count
                         )
-                    importance_score, pruning_score = compute_gaussian_score_fastgs(
-                        camlist, gaussians, pipe, background, opt, DENSIFY=True, iteration=iteration
+                    camlist = sampling_cameras(
+                        scene.getTrainCameras().copy(), score_camera_count
                     )
 
-                gaussians.densify_and_prune_fastgs(
-                    max_screen_size=size_threshold,
-                    min_opacity=0.005,
-                    extent=scene.cameras_extent,
-                    radii=radii,
-                    args=opt,
-                    importance_score=importance_score,
-                    pruning_score=pruning_score
-                )
+                    adaptive_coverage_enabled = (
+                        getattr(opt, "use_adaptive_prior", False)
+                        and (
+                            abs(float(getattr(opt, "adaptive_prior_floor", 1.0)) - 1.0) > 1e-8
+                            or abs(float(getattr(opt, "adaptive_prior_ceiling", 1.0)) - 1.0) > 1e-8
+                        )
+                    )
+                    with torch.no_grad():
+                        if adaptive_coverage_enabled:
+                            update_adaptive_ref_scores(
+                                camlist, gaussians, specular_mlp, pipe, background,
+                                opt, iteration
+                            )
+                        importance_score, pruning_score = compute_gaussian_score_fastgs(
+                            camlist, gaussians, pipe, background, opt,
+                            DENSIFY=True, iteration=iteration
+                        )
+
+                    gaussians.densify_and_prune_fastgs(
+                        max_screen_size=size_threshold,
+                        min_opacity=0.005,
+                        extent=scene.cameras_extent,
+                        radii=radii,
+                        args=opt,
+                        importance_score=importance_score,
+                        pruning_score=pruning_score
+                    )
+                else:
+                    gaussians.densify_and_prune_baseline(
+                        opt.densify_grad_threshold, 0.005,
+                        scene.cameras_extent, size_threshold, radii
+                    )
 
             if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                 gaussians.reset_opacity()
 
         # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
-        if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
+        if (use_vcp and iteration % 3000 == 0
+                and iteration > 15_000 and iteration < 30_000):
             camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
             with torch.no_grad():
                 _, pruning_score = compute_gaussian_score_fastgs(
@@ -903,7 +928,7 @@ def training(dataset, opt, pipe):
                         web_base_camera, web_target, settings,
                         opt.web_width, opt.web_height, gaussians,
                         specular_mlp, pipe, background, opt.mult,
-                        iteration > opt.specular_start_iter,
+                        use_asg and iteration > opt.specular_start_iter,
                         capture_all=record_due,
                     )
 
@@ -933,10 +958,11 @@ def training(dataset, opt, pipe):
 
         if iteration in save_iterations:
             print(f"[ITER {iteration}] Saving...")
-            scene.save(iteration)
+            scene.save(iteration, save_asg=use_asg)
 
             # ✅ QUAN TRỌNG NHẤT
-            specular_mlp.save_weights(scene.model_path, iteration)
+            if use_asg:
+                specular_mlp.save_weights(scene.model_path, iteration)
 
     # ------------------------------------------------------------
     # SAVE METADATA
@@ -979,6 +1005,11 @@ def training(dataset, opt, pipe):
         "training_time_formatted": f"{minutes}m {seconds}s",
         "peak_vram_mib": round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2),
         "asg_degree": dataset.asg_degree,
+        "use_asg": use_asg,
+        "use_vcd": use_vcd,
+        "use_vcp": use_vcp,
+        "use_compact_box": use_compact_box,
+        "compact_box_mult": opt.mult,
         "asg_num_theta": getattr(dataset, "asg_num_theta", -1),
         "asg_num_phi": getattr(dataset, "asg_num_phi", -1),
         "specular_hidden": getattr(dataset, "specular_hidden", -1),
@@ -1066,6 +1097,7 @@ def training(dataset, opt, pipe):
                                     f"0 / {len(test_cameras)} views")
             print(f"Automatic evaluation: rendering {len(test_cameras)} test views...")
             from render import render_set, save_fps_to_results
+            opt.use_asg = use_asg
             test_fps = render_set(
                 scene.model_path, "test", opt.iterations, test_cameras,
                 gaussians, pipe, background, specular_mlp, opt
@@ -1123,14 +1155,16 @@ def training(dataset, opt, pipe):
                 ply_path = os.path.join(point_dir, "point_cloud.ply")
                 asg_path = os.path.join(point_dir, "asg.pt")
                 spec_path = os.path.join(spec_dir, "specular.pth")
-                if all(os.path.isfile(path) for path in (ply_path, asg_path, spec_path)):
+                required_paths = (ply_path, asg_path, spec_path) if use_asg else (ply_path,)
+                if all(os.path.isfile(path) for path in required_paths):
                     gaussians.load_ply(ply_path)
-                    gaussians._features_asg = torch.load(
-                        asg_path, map_location="cuda"
-                    ).cuda()
-                    specular_mlp.load_weights(
-                        scene.model_path, iteration=requested_iteration
-                    )
+                    if use_asg:
+                        gaussians._features_asg = torch.load(
+                            asg_path, map_location="cuda"
+                        ).cuda()
+                        specular_mlp.load_weights(
+                            scene.model_path, iteration=requested_iteration
+                        )
                     current_view_iteration = requested_iteration
                     final_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
                     last_view_signature = None
@@ -1155,7 +1189,7 @@ def training(dataset, opt, pipe):
                         web_base_camera, final_target, settings,
                         opt.web_width, opt.web_height, gaussians,
                         specular_mlp, pipe, background, opt.mult,
-                        current_view_iteration > opt.specular_start_iter,
+                        use_asg and current_view_iteration > opt.specular_start_iter,
                     )
                 web_viewer.publish(
                     current_view_iteration, gaussian_count, allocated_mib,
@@ -1239,8 +1273,26 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument(
+        "--disable_asg", action="store_true",
+        help="Train a true SH-only ablation and persist use_asg=False in cfg_args."
+    )
+    parser.add_argument("--disable_vcd", action="store_true",
+                        help="Use vanilla 3DGS gradient densification instead of VCD.")
+    parser.add_argument("--disable_vcp", action="store_true",
+                        help="Disable periodic multi-view contribution pruning.")
+    parser.add_argument("--disable_compact_box", action="store_true",
+                        help="Use beta=1.0 instead of the Compact Box beta.")
+    parser.add_argument("--disable_multiview_contribution", action="store_true",
+                        help="Disable VCD, VCP, and Compact Box as one module.")
 
     args = parser.parse_args()
+    args.use_asg = not args.disable_asg
+    args.use_vcd = not (args.disable_vcd or args.disable_multiview_contribution)
+    args.use_vcp = not (args.disable_vcp or args.disable_multiview_contribution)
+    args.use_compact_box = not (
+        args.disable_compact_box or args.disable_multiview_contribution
+    )
 
     safe_state(False)
 

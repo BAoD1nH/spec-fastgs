@@ -71,6 +71,15 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         super().__init__(parser, "Loading Parameters", sentinel)
+        # Normalized architecture state persisted in cfg_args. It is assigned
+        # after parser registration so the public training CLI exposes only the
+        # unambiguous --disable_asg switch (old checkpoints default ON).
+        self.use_asg = True
+        # Normalized FastGS ablation state. These values are persisted in
+        # cfg_args, while train.py exposes only explicit --disable_* switches.
+        self.use_vcd = True
+        self.use_vcp = True
+        self.use_compact_box = True
 
     def extract(self, args):
         g = super().extract(args)
@@ -173,11 +182,13 @@ class OptimizationParams(ParamGroup):
         # Reflection-aware curriculum. Uniform no-replacement sampling remains
         # the backbone; a small scheduled fraction replays hard reflective views.
         self.use_reflection_view_sampling = False
-        self.reflection_sampling_ratio = 0.20
+        # Teapot sweep (0.05/0.10/0.15/0.20) selected 0.10 as the best
+        # PSNR/SSIM/LPIPS balance; temperature 1.0 preserves view diversity.
+        self.reflection_sampling_ratio = 0.10
         self.reflection_sampling_start = 6000
         self.reflection_sampling_peak_end = 15000
         self.reflection_sampling_end = 20000
-        self.reflection_sampling_temperature = 0.50
+        self.reflection_sampling_temperature = 1.00
         self.reflection_sampling_score_low_quantile = 0.70
         self.reflection_sampling_score_high_quantile = 0.95
 
