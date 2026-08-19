@@ -256,63 +256,96 @@ def get_ref_score_confidence(cam, opt):
     return None
 
 
-def update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration):
+def _normalize_adaptive_residual(residual, static_score, opt):
+    """Robustly normalize full-model error only inside RefScore support."""
+    valid = static_score > 0
+    if not torch.any(valid):
+        return torch.zeros_like(residual)
+
+    values = residual[valid]
+    low_q = float(getattr(opt, "adaptive_residual_low_quantile", 0.70))
+    high_q = float(getattr(opt, "adaptive_residual_high_quantile", 0.95))
+    low = torch.quantile(values, low_q)
+    high = torch.quantile(values, high_q)
+    if high <= low + 1e-6:
+        return torch.zeros_like(residual)
+    normalized = ((residual - low) / (high - low + 1e-6)).clamp(0.0, 1.0)
+    return normalized * valid.float()
+
+
+def _update_camera_adaptive_map(cam, residual, opt):
+    """Update one camera's persistent error for adaptive supervision."""
+    static_score = prior_to_cuda(cam.ref_score_static)
+    residual_norm = _normalize_adaptive_residual(residual, static_score, opt)
+
+    if hasattr(cam, "adaptive_error_ema"):
+        old_error = prior_to_cuda(cam.adaptive_error_ema)
+        ema = float(opt.adaptive_prior_ema)
+        persistent_error = ema * old_error + (1.0 - ema) * residual_norm
+    else:
+        # Do not dilute the first observation with an implicit zero map.
+        persistent_error = residual_norm
+
+    persistent_error = persistent_error.clamp(0.0, 1.0)
+    encoded_error = (persistent_error * 255.0).round().byte().cpu()
+    cam.adaptive_error_ema = encoded_error
+    cam.adaptive_difficulty = encoded_error.clone()
+
+    # The successful Adaptive-Loss design leaves geometric coverage exactly
+    # at the static RefScore. Non-unit bounds are supported only so the earlier
+    # coverage ablation remains reproducible.
+    floor = float(getattr(opt, "adaptive_prior_floor", 1.0))
+    ceiling = float(getattr(opt, "adaptive_prior_ceiling", 1.0))
+    if abs(floor - 1.0) > 1e-8 or abs(ceiling - 1.0) > 1e-8:
+        modulation = floor + (ceiling - floor) * persistent_error
+        effective_score = (static_score * modulation).clamp(0.0, 1.0)
+        cam.ref_score = (effective_score * 255.0).round().byte().cpu()
+
+
+def update_adaptive_ref_scores(cameras, gaussians, specular_mlp, pipe,
+                               background, opt, iteration):
+    """Legacy coverage-ablation update using full SH+ASG residuals.
+
+    The validated Adaptive-Loss default does not call this extra render path.
+    It remains available only when non-unit coverage bounds are explicitly set,
+    so the negative coverage experiment can still be reproduced.
+    """
     if not getattr(opt, 'use_ref_score', False) or not getattr(opt, 'use_adaptive_prior', False):
         return 0
     if iteration < opt.adaptive_prior_start:
         return 0
+    if iteration >= getattr(opt, 'adaptive_prior_end', opt.densify_until_iter):
+        return 0
     if iteration % opt.adaptive_prior_interval != 0:
         return 0
 
-    train_cams = scene.getTrainCameras().copy()
-    num_cameras = getattr(opt, 'adaptive_prior_num_cameras', 20)
-    if num_cameras > 0 and num_cameras < len(train_cams):
-        train_cams = sampling_cameras(train_cams, num_cameras)
-
     updated = 0
     with torch.no_grad():
-        for cam in train_cams:
+        for cam in cameras:
             if not hasattr(cam, 'ref_score_static'):
                 continue
 
-            # Render base/SH only, matching compute_gaussian_score_fastgs().
-            # This residual marks regions not yet explained by the base model.
+            # Measure what the complete model still gets wrong.  An SH-only
+            # residual would keep marking highlights even after ASG learned them.
+            xyz = gaussians.get_xyz
+            viewdir = xyz - cam.camera_center
+            viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+            normal = gaussians.get_normal_axis(viewdir)
+            mlp_color = specular_mlp.step(
+                gaussians.get_asg_features, viewdir, normal.detach()
+            )
             render_img = render_fastgs(
                 cam,
                 gaussians,
                 pipe,
                 background,
                 opt.mult,
-                mlp_color=None
+                mlp_color=mlp_color
             )["render"]
 
             gt = cam.original_image.cuda()
             residual = torch.abs(render_img - gt).mean(dim=0)
-            robust_max = torch.quantile(residual.flatten(), 0.95)
-            residual_norm = (residual / (robust_max + 1e-6)).clamp(0.0, 1.0)
-
-            static_score = prior_to_cuda(cam.ref_score_static)
-            current_score = prior_to_cuda(cam.ref_score)
-            adaptive = residual_norm * static_score
-            adaptive_max = adaptive.max()
-            if adaptive_max > 0:
-                adaptive = adaptive / (adaptive_max + 1e-6)
-
-            alpha = opt.adaptive_prior_ema
-            updated_score = alpha * current_score + (1.0 - alpha) * adaptive
-            cam.ref_score = (updated_score.clamp(0.0, 1.0) * 255.0).byte().cpu()
-            if hasattr(cam, "ref_score_conf_static"):
-                static_conf = prior_to_cuda(cam.ref_score_conf_static)
-                current_conf = prior_to_cuda(cam.ref_score_conf)
-                adaptive_conf = residual_norm * static_conf
-                adaptive_conf_max = adaptive_conf.max()
-                if adaptive_conf_max > 0:
-                    adaptive_conf = adaptive_conf / (adaptive_conf_max + 1e-6)
-                updated_conf = alpha * current_conf + (1.0 - alpha) * adaptive_conf
-                cam.ref_score_conf = (updated_conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
-            else:
-                conf = build_ref_score_confidence(cam.ref_score, opt)
-                cam.ref_score_conf = (conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
+            _update_camera_adaptive_map(cam, residual, opt)
             updated += 1
 
     if updated:
@@ -328,6 +361,13 @@ def training(dataset, opt, pipe):
 
     start_time = time.time()
     tb_writer = prepare_output_and_logger(dataset)
+
+    # Adaptive Prior is a refinement of Reflection Score.  Make the public
+    # interface unambiguous: --use_adaptive_prior is sufficient to enable the
+    # complete feature with its validated defaults.
+    if getattr(opt, "use_adaptive_prior", False) and not opt.use_ref_score:
+        opt.use_ref_score = True
+        print("[Adaptive Prior] enabling --use_ref_score automatically")
 
     # ------------------------------------------------------------
     # INIT MODELS
@@ -612,13 +652,34 @@ def training(dataset, opt, pipe):
 
         gt = cam.original_image.cuda()
 
-        if (
-            getattr(opt, "lambda_spec_l1_weight", 0.0) > 0.0
-            and hasattr(cam, "ref_score")
-        ):
-            pixel_l1 = torch.abs(image - gt)
+        adaptive_active = (
+            getattr(opt, "use_adaptive_prior", False)
+            and hasattr(cam, "ref_score_static")
+            and iteration >= opt.adaptive_prior_start
+            and iteration < getattr(opt, "adaptive_prior_end", opt.densify_until_iter)
+        )
+        if adaptive_active:
+            # Reuse the current training render: this gives all training views
+            # temporal coverage without an additional renderer invocation.
+            with torch.no_grad():
+                current_residual = torch.abs(image.detach() - gt).mean(dim=0)
+                _update_camera_adaptive_map(cam, current_residual, opt)
+
+        weight_map = None
+        if adaptive_active and hasattr(cam, "adaptive_difficulty"):
+            difficulty = prior_to_cuda(cam.adaptive_difficulty).unsqueeze(0)
+            adaptive_strength = float(getattr(opt, "adaptive_loss_strength", 0.15))
+            weight_map = 1.0 + adaptive_strength * difficulty
+
+        if getattr(opt, "lambda_spec_l1_weight", 0.0) > 0.0 and hasattr(cam, "ref_score"):
             ref_w = get_ref_score_confidence(cam, opt).unsqueeze(0)
-            weight_map = 1.0 + opt.lambda_spec_l1_weight * ref_w
+            spec_weight = 1.0 + opt.lambda_spec_l1_weight * ref_w
+            weight_map = spec_weight if weight_map is None else weight_map * spec_weight
+
+        if weight_map is not None:
+            pixel_l1 = torch.abs(image - gt)
+            # Keep the global loss scale stable; only redistribute gradients.
+            weight_map = weight_map / weight_map.mean().clamp_min(1e-6)
             Ll1 = (pixel_l1 * weight_map).sum() / (3.0 * weight_map.sum().clamp_min(1e-6))
         else:
             Ll1 = l1_loss(image, gt)
@@ -667,8 +728,6 @@ def training(dataset, opt, pipe):
         if iteration % 10 == 0:
             progress_bar.set_postfix({"loss": f"{ema_loss:.6f}"})
 
-        update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration)
-
         # --------------------------------------------------------
         # DENSIFY (FASTGS)
         # --------------------------------------------------------
@@ -700,9 +759,32 @@ def training(dataset, opt, pipe):
                 iteration % opt.densification_interval == 0
             ):
                 size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
+                score_camera_count = opt.num_score_cameras
+                if getattr(opt, "use_adaptive_prior", False):
+                    score_camera_count = getattr(
+                        opt, "adaptive_prior_num_cameras", score_camera_count
+                    )
+                camlist = sampling_cameras(
+                    scene.getTrainCameras().copy(), score_camera_count
+                )
 
+                # Adaptive Loss reuses the ordinary training render and keeps
+                # static RefScore for geometry, so it needs no extra render here.
+                # Only reproduce the legacy coverage ablation when explicitly
+                # requested through non-unit modulation bounds.
+                adaptive_coverage_enabled = (
+                    getattr(opt, "use_adaptive_prior", False)
+                    and (
+                        abs(float(getattr(opt, "adaptive_prior_floor", 1.0)) - 1.0) > 1e-8
+                        or abs(float(getattr(opt, "adaptive_prior_ceiling", 1.0)) - 1.0) > 1e-8
+                    )
+                )
                 with torch.no_grad():
+                    if adaptive_coverage_enabled:
+                        update_adaptive_ref_scores(
+                            camlist, gaussians, specular_mlp, pipe, background,
+                            opt, iteration
+                        )
                     importance_score, pruning_score = compute_gaussian_score_fastgs(
                         camlist, gaussians, pipe, background, opt, DENSIFY=True, iteration=iteration
                     )
@@ -856,9 +938,15 @@ def training(dataset, opt, pipe):
         "refscore_conf_min": opt.refscore_conf_min,
         "use_adaptive_prior": opt.use_adaptive_prior,
         "adaptive_prior_start": opt.adaptive_prior_start,
+        "adaptive_prior_end": opt.adaptive_prior_end,
         "adaptive_prior_interval": opt.adaptive_prior_interval,
         "adaptive_prior_num_cameras": opt.adaptive_prior_num_cameras,
         "adaptive_prior_ema": opt.adaptive_prior_ema,
+        "adaptive_prior_floor": opt.adaptive_prior_floor,
+        "adaptive_prior_ceiling": opt.adaptive_prior_ceiling,
+        "adaptive_residual_low_quantile": opt.adaptive_residual_low_quantile,
+        "adaptive_residual_high_quantile": opt.adaptive_residual_high_quantile,
+        "adaptive_loss_strength": opt.adaptive_loss_strength,
         "ref_prior_method": opt.ref_prior_method,
         "ti_thresh": opt.ti_thresh,
         "ti_bright": opt.ti_bright,

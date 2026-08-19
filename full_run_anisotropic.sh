@@ -22,8 +22,11 @@ python train.py \
     --refscore_strength 0.75 \
     --optimizer_type default \
     --use_ref_score \
-    --use_adaptive_prior 
-    # --use_sh_spec_mask
+    --use_adaptive_prior \
+    --adaptive_prior_floor 1.0 \
+    --adaptive_prior_ceiling 1.0 \
+    --adaptive_loss_strength 0.15 \
+    --use_sh_spec_mask
 
 
 python render.py -s datasets/Anisotropic-Synthesis/teapot -m output/anisotropic_synthetic/teapot --iteration 30000 --skip_train --data_device cpu

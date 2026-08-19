@@ -139,7 +139,8 @@ class OptimizationParams(ParamGroup):
         self.refscore_threshold_max = 0.9
         # Reflection evidence softly reweights reconstruction error. It must
         # not independently turn a bright pixel into a densification target.
-        self.refscore_strength = 0.5
+        # 0.75 was the best balanced static setting on the teapot sweep.
+        self.refscore_strength = 0.75
 
         self.refscore_conf_quantile = 0.85
         self.refscore_conf_gamma = 1.5
@@ -192,11 +193,19 @@ class OptimizationParams(ParamGroup):
 
         self.use_ref_score = False #Geometric coverage bằng reflection score
         self.disable_ref_score = False #Tắt reflection score?
-        self.use_adaptive_prior = False #Cập nhật prior động theo residual trong lúc train?
-        self.adaptive_prior_start = 5000 #Bắt đầu cập nhật prior động
-        self.adaptive_prior_interval = 3000
+        self.use_adaptive_prior = False #Adaptive residual-weighted supervision; static RefScore vẫn dẫn densification
+        self.adaptive_prior_start = 6000
+        self.adaptive_prior_end = 15000
+        self.adaptive_prior_interval = 500
         self.adaptive_prior_num_cameras = 10
-        self.adaptive_prior_ema = 0.8
+        self.adaptive_prior_ema = 0.9
+        # Preserve the validated static RefScore for geometry. Values other
+        # than 1.0 are retained only to reproduce the negative coverage ablation.
+        self.adaptive_prior_floor = 1.0
+        self.adaptive_prior_ceiling = 1.0
+        self.adaptive_residual_low_quantile = 0.70
+        self.adaptive_residual_high_quantile = 0.95
+        self.adaptive_loss_strength = 0.15
         
         super().__init__(parser, "Optimization Parameters")
 
