@@ -291,6 +291,26 @@ def _update_camera_adaptive_map(cam, residual, opt):
     cam.adaptive_error_ema = encoded_error
     cam.adaptive_difficulty = encoded_error.clone()
 
+    # Camera-level score for reflection-aware hard-view replay. Use a robust
+    # mean of joint reflection confidence and persistent reconstruction error;
+    # isolated outlier pixels cannot dominate the sampling distribution.
+    if hasattr(cam, "ref_score_conf_static"):
+        ref_confidence = prior_to_cuda(cam.ref_score_conf_static).pow(1.5)
+    else:
+        ref_confidence = static_score.pow(1.5)
+    joint_difficulty = ref_confidence * persistent_error
+    valid_values = joint_difficulty[ref_confidence > 0]
+    camera_score = 0.0
+    if valid_values.numel() > 0:
+        low_q = float(getattr(opt, "reflection_sampling_score_low_quantile", 0.70))
+        high_q = float(getattr(opt, "reflection_sampling_score_high_quantile", 0.95))
+        low = torch.quantile(valid_values, low_q)
+        high = torch.quantile(valid_values, high_q)
+        robust_values = valid_values[(valid_values >= low) & (valid_values <= high)]
+        if robust_values.numel() > 0:
+            camera_score = robust_values.mean().item()
+    cam.reflection_sampling_score = max(float(camera_score), 0.0)
+
     # The successful Adaptive-Loss design leaves geometric coverage exactly
     # at the static RefScore. Non-unit bounds are supported only so the earlier
     # coverage ablation remains reproducible.
@@ -300,6 +320,52 @@ def _update_camera_adaptive_map(cam, residual, opt):
         modulation = floor + (ceiling - floor) * persistent_error
         effective_score = (static_score * modulation).clamp(0.0, 1.0)
         cam.ref_score = (effective_score * 255.0).round().byte().cpu()
+
+
+def reflection_sampling_ratio(iteration, opt):
+    """Scheduled probability of replaying a hard reflective training view."""
+    if not getattr(opt, "use_reflection_view_sampling", False):
+        return 0.0
+    start = int(opt.reflection_sampling_start)
+    peak_end = int(opt.reflection_sampling_peak_end)
+    end = int(opt.reflection_sampling_end)
+    maximum = float(opt.reflection_sampling_ratio)
+    if iteration < start or iteration >= end:
+        return 0.0
+    if iteration < peak_end:
+        return maximum
+    decay = (iteration - peak_end) / max(end - peak_end, 1)
+    return maximum * max(1.0 - decay, 0.0)
+
+
+def sample_training_camera(viewpoint_stack, viewpoint_indices, all_cameras,
+                           iteration, opt):
+    """Mix coverage-preserving uniform sampling with hard-view replay."""
+    ratio = reflection_sampling_ratio(iteration, opt)
+    prioritized = False
+    selected_score = 0.0
+
+    if ratio > 0.0 and torch.rand((), device="cpu").item() < ratio:
+        scores = torch.tensor([
+            max(float(getattr(cam, "reflection_sampling_score", 0.0)), 0.0)
+            for cam in all_cameras
+        ], dtype=torch.float64)
+        if scores.sum() > 0:
+            temperature = max(float(opt.reflection_sampling_temperature), 1e-3)
+            weights = (scores + 1e-12).pow(1.0 / temperature)
+            selected = int(torch.multinomial(weights, 1).item())
+            cam = all_cameras[selected]
+            prioritized = True
+            selected_score = float(scores[selected].item())
+            # Deliberately do not pop from viewpoint_stack: prioritized samples
+            # are additional replays, while uniform steps still cover every view.
+            return cam, prioritized, selected_score, ratio
+
+    idx = randint(0, len(viewpoint_indices) - 1)
+    cam = viewpoint_stack.pop(idx)
+    viewpoint_indices.pop(idx)
+    selected_score = float(getattr(cam, "reflection_sampling_score", 0.0))
+    return cam, prioritized, selected_score, ratio
 
 
 def update_adaptive_ref_scores(cameras, gaussians, specular_mlp, pipe,
@@ -361,6 +427,14 @@ def training(dataset, opt, pipe):
 
     start_time = time.time()
     tb_writer = prepare_output_and_logger(dataset)
+
+    # Reflection-aware sampling consumes the persistent scores maintained by
+    # Adaptive Prior. Keep the public interface safe when the sampling flag is
+    # used on its own.
+    if (getattr(opt, "use_reflection_view_sampling", False)
+            and not getattr(opt, "use_adaptive_prior", False)):
+        opt.use_adaptive_prior = True
+        print("[Reflection Sampling] enabling --use_adaptive_prior automatically")
 
     # Adaptive Prior is a refinement of Reflection Score.  Make the public
     # interface unambiguous: --use_adaptive_prior is sufficient to enable the
@@ -508,8 +582,10 @@ def training(dataset, opt, pipe):
     prev_vis_mask: torch.Tensor | None = None
     asg_eval_count_total = 0
     asg_eval_steps = 0
-    sh_spec_mask_ratio_total = 0.0
-    sh_spec_mask_steps = 0
+    reflection_sampling_priority_steps = 0
+    reflection_sampling_ratio_total = 0.0
+    reflection_sampling_selected_score_total = 0.0
+    reflection_sampling_active_steps = 0
     spec_reg_loss_total = 0.0
     spec_reg_steps = 0
 
@@ -528,9 +604,19 @@ def training(dataset, opt, pipe):
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
 
-        idx = randint(0, len(viewpoint_indices) - 1)
-        cam = viewpoint_stack.pop(idx)
-        viewpoint_indices.pop(idx)
+        cam, prioritized_view, selected_view_score, sampling_ratio = sample_training_camera(
+            viewpoint_stack,
+            viewpoint_indices,
+            scene.getTrainCameras(),
+            iteration,
+            opt,
+        )
+        if sampling_ratio > 0.0:
+            reflection_sampling_active_steps += 1
+            reflection_sampling_ratio_total += sampling_ratio
+        if prioritized_view:
+            reflection_sampling_priority_steps += 1
+            reflection_sampling_selected_score_total += selected_view_score
 
         # --------------------------------------------------------
         # COMPUTE VIEWDIR + NORMAL
@@ -588,19 +674,6 @@ def training(dataset, opt, pipe):
                     (n_gs, 3), device="cuda"
                 ).index_put((vis_indices,), spec_sparse)
 
-        collect_sh_spec_mask = (
-            getattr(opt, "use_sh_spec_mask", False)
-            and iteration >= getattr(opt, "sh_spec_mask_start", 0)
-            and hasattr(cam, "ref_score")
-        )
-        collect_ref_conf_projection = collect_sh_spec_mask
-        sh_spec_metric_map = None
-        if collect_ref_conf_projection:
-            ref_conf = get_ref_score_confidence(cam, opt)
-            sh_spec_metric_map = (
-                ref_conf > opt.sh_spec_mask_threshold
-            ).reshape(-1).int()
-
         # --------------------------------------------------------
         # RENDER  (single pass — Phase A removes redundant sh & spec-sharp passes)
         # --------------------------------------------------------
@@ -612,8 +685,6 @@ def training(dataset, opt, pipe):
             background,
             opt.mult,
             mlp_color=mlp_color,
-            get_flag=collect_ref_conf_projection,
-            metric_map=sh_spec_metric_map,
         )
 
         image                 = render_pkg["render"]
@@ -621,18 +692,6 @@ def training(dataset, opt, pipe):
         visibility_filter     = render_pkg["visibility_filter"]
         radii                 = render_pkg["radii"]
         accum_metric_counts   = render_pkg["accum_metric_counts"]
-
-        sh_spec_grad_mask = None
-        projected_ref_conf_mask = None
-        if collect_ref_conf_projection and accum_metric_counts is not None:
-            mask_counts = accum_metric_counts.reshape(-1)
-            if mask_counts.shape[0] == gaussians.get_xyz.shape[0]:
-                projected_ref_conf_mask = mask_counts >= opt.sh_spec_min_metric_count
-                if collect_sh_spec_mask:
-                    sh_spec_grad_mask = projected_ref_conf_mask
-                if sh_spec_grad_mask is not None and sh_spec_grad_mask.numel() > 0:
-                    sh_spec_mask_ratio_total += sh_spec_grad_mask.float().mean().item()
-                    sh_spec_mask_steps += 1
 
         # ── Update cached visibility mask for the NEXT iteration ──────────
         # radii has shape [N]; (radii > 0) gives the boolean visibility mask.
@@ -711,8 +770,6 @@ def training(dataset, opt, pipe):
         gaussians.optimizer_step(
             iteration,
             skip_sh=skip_sh,
-            f_rest_grad_mask=sh_spec_grad_mask,
-            f_rest_grad_scale=opt.sh_spec_grad_scale,
         )
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
@@ -889,7 +946,14 @@ def training(dataset, opt, pipe):
     minutes = int(duration // 60)
     seconds = int(duration % 60)
     avg_asg_eval_count = asg_eval_count_total / asg_eval_steps if asg_eval_steps > 0 else 0.0
-    avg_sh_spec_mask_ratio = sh_spec_mask_ratio_total / sh_spec_mask_steps if sh_spec_mask_steps > 0 else 0.0
+    avg_reflection_sampling_ratio = (
+        reflection_sampling_ratio_total / reflection_sampling_active_steps
+        if reflection_sampling_active_steps > 0 else 0.0
+    )
+    avg_prioritized_view_score = (
+        reflection_sampling_selected_score_total / reflection_sampling_priority_steps
+        if reflection_sampling_priority_steps > 0 else 0.0
+    )
     avg_spec_reg_loss = spec_reg_loss_total / spec_reg_steps if spec_reg_steps > 0 else 0.0
     heatmap_path = save_gaussian_view_heatmaps(
         scene.getTestCameras(),
@@ -959,12 +1023,18 @@ def training(dataset, opt, pipe):
         "f_rest_interval_early": opt.f_rest_interval_early,
         "f_rest_interval_mid": opt.f_rest_interval_mid,
         "f_rest_interval_late": opt.f_rest_interval_late,
-        "use_sh_spec_mask": opt.use_sh_spec_mask,
-        "sh_spec_mask_threshold": opt.sh_spec_mask_threshold,
-        "sh_spec_grad_scale": opt.sh_spec_grad_scale,
-        "sh_spec_mask_start": opt.sh_spec_mask_start,
-        "sh_spec_min_metric_count": opt.sh_spec_min_metric_count,
-        "avg_sh_spec_mask_ratio": round(avg_sh_spec_mask_ratio, 6),
+        "use_reflection_view_sampling": opt.use_reflection_view_sampling,
+        "reflection_sampling_ratio": opt.reflection_sampling_ratio,
+        "reflection_sampling_start": opt.reflection_sampling_start,
+        "reflection_sampling_peak_end": opt.reflection_sampling_peak_end,
+        "reflection_sampling_end": opt.reflection_sampling_end,
+        "reflection_sampling_temperature": opt.reflection_sampling_temperature,
+        "reflection_sampling_score_low_quantile": opt.reflection_sampling_score_low_quantile,
+        "reflection_sampling_score_high_quantile": opt.reflection_sampling_score_high_quantile,
+        "reflection_sampling_priority_steps": reflection_sampling_priority_steps,
+        "reflection_sampling_active_steps": reflection_sampling_active_steps,
+        "avg_reflection_sampling_ratio": round(avg_reflection_sampling_ratio, 6),
+        "avg_prioritized_view_score": round(avg_prioritized_view_score, 8),
         "lambda_spec_l1_weight": opt.lambda_spec_l1_weight,
         "lambda_spec_reg": opt.lambda_spec_reg,
         "avg_spec_reg_loss": round(avg_spec_reg_loss, 8),

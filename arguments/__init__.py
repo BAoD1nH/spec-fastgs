@@ -170,12 +170,16 @@ class OptimizationParams(ParamGroup):
         self.f_rest_interval_mid = 32
         self.f_rest_interval_late = 64
         
-        # Representation Capacity / Role Separation
-        self.use_sh_spec_mask = False #giảm vai trò SH ở vùng specular để ASG học?
-        self.sh_spec_mask_threshold = 0.85
-        self.sh_spec_grad_scale = 0.9
-        self.sh_spec_mask_start = 8000 #Chỉ phân vai sau khi SH/geometry đã tương đối ổn định
-        self.sh_spec_min_metric_count = 2
+        # Reflection-aware curriculum. Uniform no-replacement sampling remains
+        # the backbone; a small scheduled fraction replays hard reflective views.
+        self.use_reflection_view_sampling = False
+        self.reflection_sampling_ratio = 0.20
+        self.reflection_sampling_start = 6000
+        self.reflection_sampling_peak_end = 15000
+        self.reflection_sampling_end = 20000
+        self.reflection_sampling_temperature = 0.50
+        self.reflection_sampling_score_low_quantile = 0.70
+        self.reflection_sampling_score_high_quantile = 0.95
 
         # Supervision Signal
         self.lambda_spec_l1_weight = 0.0

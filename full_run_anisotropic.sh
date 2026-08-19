@@ -26,8 +26,9 @@ python train.py \
     --adaptive_prior_floor 1.0 \
     --adaptive_prior_ceiling 1.0 \
     --adaptive_loss_strength 0.15 \
-    --use_sh_spec_mask
-
+    --use_reflection_view_sampling \
+    --reflection_sampling_ratio 0.15 \
+    --reflection_sampling_temperature 1.0
 
 python render.py -s datasets/Anisotropic-Synthesis/teapot -m output/anisotropic_synthetic/teapot --iteration 30000 --skip_train --data_device cpu
 
