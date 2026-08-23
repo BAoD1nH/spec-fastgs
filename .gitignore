@@ -30,7 +30,16 @@ __pycache__/
 *.jpg
 *.png
 
-/submodules/
+# Vendor the CUDA extension sources, but never commit local build products.
+/submodules/gridencoder/
+submodules/**/build/
+submodules/**/dist/
+submodules/**/*.egg-info/
+submodules/**/__pycache__/
+submodules/**/*.pyc
+submodules/**/*.so
+submodules/**/*.o
+/submodules/diff-gaussian-rasterization_fastgs/third_party/glm/doc/
 /output_spec_fastgs/
 Specular-Gaussians/
 
