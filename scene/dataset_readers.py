@@ -275,7 +275,19 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png", llffhold=8):
+def _split_anisotropic_cameras_like_specgaussian(cam_infos):
+    """Use Specular-Gaussians' deterministic 2:1 split for transforms.json.
+
+    Camera order is preserved: indices divisible by three are test views and
+    the remaining indices are training views. A 300-view scene therefore
+    yields exactly 200 training and 100 test cameras.
+    """
+    train_cam_infos = [cam for idx, cam in enumerate(cam_infos) if idx % 3 != 0]
+    test_cam_infos = [cam for idx, cam in enumerate(cam_infos) if idx % 3 == 0]
+    return train_cam_infos, test_cam_infos
+
+
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     single_transforms = os.path.join(path, "transforms.json")
     split_transforms = os.path.join(path, "transforms_train.json")
     if os.path.isfile(single_transforms) and not os.path.isfile(split_transforms):
@@ -284,8 +296,13 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", llffho
             path, "transforms.json", white_background, extension
         )
         if eval:
-            train_cam_infos = [cam for i, cam in enumerate(cam_infos) if i % llffhold != 0]
-            test_cam_infos = [cam for i, cam in enumerate(cam_infos) if i % llffhold == 0]
+            train_cam_infos, test_cam_infos = (
+                _split_anisotropic_cameras_like_specgaussian(cam_infos)
+            )
+            print(
+                "SpecGaussian split for transforms.json: "
+                f"{len(train_cam_infos)} train / {len(test_cam_infos)} test"
+            )
         else:
             train_cam_infos = cam_infos
             test_cam_infos = []
