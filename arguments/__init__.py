@@ -71,6 +71,15 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         super().__init__(parser, "Loading Parameters", sentinel)
+        # Normalized architecture state persisted in cfg_args. It is assigned
+        # after parser registration so the public training CLI exposes only the
+        # unambiguous --disable_asg switch (old checkpoints default ON).
+        self.use_asg = True
+        # Normalized FastGS ablation state. These values are persisted in
+        # cfg_args, while train.py exposes only explicit --disable_* switches.
+        self.use_vcd = True
+        self.use_vcp = True
+        self.use_compact_box = True
 
     def extract(self, args):
         g = super().extract(args)
@@ -91,6 +100,18 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
+
+        # Live browser visualization (server-side CUDA rendering)
+        self.web_viewer = False
+        self.web_host = "127.0.0.1"
+        self.web_http_port = 8080
+        self.web_ws_port = 6009
+        self.web_stream_interval = 10
+        self.web_width = 960
+        self.web_height = 540
+        self.web_save_frames = False
+        self.checkpoint_interval = 0
+        self.checkpoint_iterations = ""
 
         #Learning Rate Cho Gaussian Position (xyz)
         self.position_lr_init = 0.00016
@@ -125,6 +146,10 @@ class OptimizationParams(ParamGroup):
         self.refscore_min_strength = 0.15
         self.refscore_threshold_min = 0.5 #Ngưỡng chọn vùng ref-score [min, max]
         self.refscore_threshold_max = 0.9
+        # Reflection evidence softly reweights reconstruction error. It must
+        # not independently turn a bright pixel into a densification target.
+        # 0.75 was the best balanced static setting on the teapot sweep.
+        self.refscore_strength = 0.75
 
         self.refscore_conf_quantile = 0.85
         self.refscore_conf_gamma = 1.5
@@ -154,12 +179,18 @@ class OptimizationParams(ParamGroup):
         self.f_rest_interval_mid = 32
         self.f_rest_interval_late = 64
         
-        # Representation Capacity / Role Separation
-        self.use_sh_spec_mask = False #giảm vai trò SH ở vùng specular để ASG học?
-        self.sh_spec_mask_threshold = 0.7
-        self.sh_spec_grad_scale = 0.0
-        self.sh_spec_mask_start = 3000 #ASG bắt đầu tham gia vào vùng specular từ iter này
-        self.sh_spec_min_metric_count = 1
+        # Reflection-aware curriculum. Uniform no-replacement sampling remains
+        # the backbone; a small scheduled fraction replays hard reflective views.
+        self.use_reflection_view_sampling = False
+        # Teapot sweep (0.05/0.10/0.15/0.20) selected 0.10 as the best
+        # PSNR/SSIM/LPIPS balance; temperature 1.0 preserves view diversity.
+        self.reflection_sampling_ratio = 0.10
+        self.reflection_sampling_start = 6000
+        self.reflection_sampling_peak_end = 15000
+        self.reflection_sampling_end = 20000
+        self.reflection_sampling_temperature = 1.00
+        self.reflection_sampling_score_low_quantile = 0.70
+        self.reflection_sampling_score_high_quantile = 0.95
 
         # Supervision Signal
         self.lambda_spec_l1_weight = 0.0
@@ -177,11 +208,19 @@ class OptimizationParams(ParamGroup):
 
         self.use_ref_score = False #Geometric coverage bằng reflection score
         self.disable_ref_score = False #Tắt reflection score?
-        self.use_adaptive_prior = False #Cập nhật prior động theo residual trong lúc train?
-        self.adaptive_prior_start = 5000 #Bắt đầu cập nhật prior động
-        self.adaptive_prior_interval = 3000
-        self.adaptive_prior_num_cameras = 20
-        self.adaptive_prior_ema = 0.7
+        self.use_adaptive_prior = False #Adaptive residual-weighted supervision; static RefScore vẫn dẫn densification
+        self.adaptive_prior_start = 6000
+        self.adaptive_prior_end = 15000
+        self.adaptive_prior_interval = 500
+        self.adaptive_prior_num_cameras = 10
+        self.adaptive_prior_ema = 0.9
+        # Preserve the validated static RefScore for geometry. Values other
+        # than 1.0 are retained only to reproduce the negative coverage ablation.
+        self.adaptive_prior_floor = 1.0
+        self.adaptive_prior_ceiling = 1.0
+        self.adaptive_residual_low_quantile = 0.70
+        self.adaptive_residual_high_quantile = 0.95
+        self.adaptive_loss_strength = 0.15
         
         super().__init__(parser, "Optimization Parameters")
 

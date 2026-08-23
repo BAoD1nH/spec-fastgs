@@ -66,7 +66,8 @@ class Scene:
                 args.source_path, args.images, args.eval
             )
 
-        elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+        elif (os.path.exists(os.path.join(args.source_path, "transforms_train.json"))
+              or os.path.exists(os.path.join(args.source_path, "transforms.json"))):
             print("Detected Blender dataset")
             scene_info = sceneLoadTypeCallbacks["Blender"](
                 args.source_path, args.white_background, args.eval
@@ -154,7 +155,7 @@ class Scene:
     # SAVE
     # ------------------------------------------------------------
 
-    def save(self, iteration):
+    def save(self, iteration, save_asg=True):
         path = os.path.join(
             self.model_path,
             f"point_cloud/iteration_{iteration}"
@@ -164,10 +165,11 @@ class Scene:
             os.path.join(path, "point_cloud.ply")
         )
 
-        torch.save(
-            self.gaussians.get_asg_features.detach().cpu(),
-            os.path.join(path, "asg.pt")
-        )
+        if save_asg:
+            torch.save(
+                self.gaussians.get_asg_features.detach().cpu(),
+                os.path.join(path, "asg.pt")
+            )
     # ------------------------------------------------------------
     # GET CAMERAS
     # ------------------------------------------------------------

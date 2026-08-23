@@ -51,6 +51,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         gt_alpha_mask=mask,
         image_name=cam_info.image_name,
         uid=id,
+        image_path=getattr(cam_info, "image_path", None),
         data_device=args.data_device,
         depth=getattr(cam_info, "depth", None),  # ✅ SG compat
     )
@@ -78,4 +79,3 @@ def camera_to_JSON(id, camera: Camera):
         "fy": fov2focal(camera.FovY, camera.height),
         "fx": fov2focal(camera.FovX, camera.width),
     }
-

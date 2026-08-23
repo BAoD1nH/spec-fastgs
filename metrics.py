@@ -67,26 +67,20 @@ def masked_psnr(pred, gt, mask):
 def computeAuxMetrics(render, gt, spec_images):
     only_asg = spec_images.get("only_asg")
     residual_real = spec_images.get("residual_real")
-    if only_asg is None or residual_real is None:
+    if residual_real is None:
         return {}
 
     # Residual-derived mask approximates specular regions in rendered test views.
     residual_gray = residual_real.mean(dim=1, keepdim=True)
-    asg_gray = only_asg.mean(dim=1, keepdim=True)
     spec_mask = residual_gray > 0.02
     non_spec_mask = ~spec_mask
-    asg_mask = asg_gray > 0.02
 
     aux = {
         "Spec_L1": None,
         "Spec_PSNR": None,
         "NonSpec_L1": None,
         "NonSpec_PSNR": None,
-        "ASG_Mean": only_asg.mean(),
-        "ASG_Max": only_asg.max(),
         "Residual_Mean": residual_real.mean(),
-        "ASG_Energy_In_Residual": None,
-        "ASG_Residual_IoU": None,
     }
 
     aux["Spec_L1"] = masked_l1(render, gt, spec_mask)
@@ -94,13 +88,21 @@ def computeAuxMetrics(render, gt, spec_images):
     aux["NonSpec_L1"] = masked_l1(render, gt, non_spec_mask)
     aux["NonSpec_PSNR"] = masked_psnr(render, gt, non_spec_mask)
 
-    asg_energy = only_asg.sum()
-    if asg_energy > 0:
-        aux["ASG_Energy_In_Residual"] = only_asg[spec_mask.expand_as(only_asg)].sum() / asg_energy
-
-    union = torch.logical_or(asg_mask, spec_mask).sum()
-    if union > 0:
-        aux["ASG_Residual_IoU"] = torch.logical_and(asg_mask, spec_mask).sum().float() / union.float()
+    if only_asg is not None:
+        asg_gray = only_asg.mean(dim=1, keepdim=True)
+        asg_mask = asg_gray > 0.02
+        aux["ASG_Mean"] = only_asg.mean()
+        aux["ASG_Max"] = only_asg.max()
+        asg_energy = only_asg.sum()
+        if asg_energy > 0:
+            aux["ASG_Energy_In_Residual"] = (
+                only_asg[spec_mask.expand_as(only_asg)].sum() / asg_energy
+            )
+        union = torch.logical_or(asg_mask, spec_mask).sum()
+        if union > 0:
+            aux["ASG_Residual_IoU"] = (
+                torch.logical_and(asg_mask, spec_mask).sum().float() / union.float()
+            )
 
     return aux
 
@@ -124,6 +126,36 @@ def evaluate(model_paths):
     for scene_dir in model_paths:
         try:
             print("Scene:", scene_dir)
+            # render.py runs before metrics.py and stores FPS in results.json.
+            # Preserve it when rebuilding the file with image-quality metrics.
+            previous_results = {}
+            results_path = Path(scene_dir) / "results.json"
+            if results_path.is_file():
+                try:
+                    with open(results_path, "r") as fp:
+                        previous_results = json.load(fp)
+                except (OSError, json.JSONDecodeError):
+                    previous_results = {}
+
+            training_metrics = {}
+            train_info_path = Path(scene_dir) / "train_info.json"
+            if train_info_path.is_file():
+                try:
+                    with open(train_info_path, "r") as fp:
+                        train_info = json.load(fp)
+                    training_metrics = {
+                        "Gaussian_Number": train_info.get("final_gaussians"),
+                        "Training_Time_Seconds": train_info.get("training_time_seconds"),
+                        "Peak_VRAM_MiB": train_info.get("peak_vram_mib"),
+                    }
+                    training_metrics = {
+                        key: value
+                        for key, value in training_metrics.items()
+                        if value is not None
+                    }
+                except (OSError, json.JSONDecodeError):
+                    training_metrics = {}
+
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             grouped_dict[scene_dir] = {}
@@ -177,6 +209,10 @@ def evaluate(model_paths):
                     "PSNR": torch.tensor(psnrs).mean().item(),
                     "LPIPS": torch.tensor(lpipss).mean().item()
                 }
+                previous_method = previous_results.get(method, {})
+                if "FPS" in previous_method:
+                    main_metrics["FPS"] = previous_method["FPS"]
+                main_metrics.update(training_metrics)
                 main_per_view = {
                     "SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
                     "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},

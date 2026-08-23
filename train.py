@@ -4,7 +4,8 @@
 
 import torch
 import numpy as np
-import os, time, sys, json
+import os, time, sys, json, math
+from io import BytesIO
 from random import randint
 from tqdm import tqdm
 import uuid
@@ -15,9 +16,11 @@ from utils.image_utils import psnr
 
 from gaussian_renderer import render_fastgs
 from scene import Scene, GaussianModel, SpecularModel
+from scene.cameras import MiniCam
+from utils.graphics_utils import getProjectionMatrix
 
 from utils.general_utils import safe_state
-from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
+from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras, prior_to_cuda
 from utils.gaussian_heatmap import save_gaussian_view_heatmaps
 
 from argparse import ArgumentParser, Namespace
@@ -47,12 +50,181 @@ def configure_refscore_budget(opt, initial_gaussians):
         print(f"[Ref Score Budget] cap: {opt.max_refscore_gaussians:,} Gaussians")
 
 
+def _tensor_to_jpeg(image, quality=86):
+    """Encode a CUDA CHW float image without requiring extra web packages."""
+    from PIL import Image
+    pixels = (image.detach().clamp(0, 1).mul(255).byte()
+              .permute(1, 2, 0).contiguous().cpu().numpy())
+    output = BytesIO()
+    Image.fromarray(pixels).save(output, format="JPEG", quality=quality)
+    return output.getvalue()
+
+
+def _make_orbit_camera(base_camera, target, settings, width, height):
+    """Create a browser-controlled MiniCam around a fixed scene target."""
+    base_eye = base_camera.camera_center.detach().cpu().numpy()
+    target = np.asarray(target, dtype=np.float32)
+    offset = base_eye - target
+    radius = max(float(np.linalg.norm(offset)), 1e-3) * float(settings["zoom"])
+    base_yaw = math.atan2(float(offset[0]), float(offset[2]))
+    base_pitch = math.asin(float(np.clip(offset[1] / max(np.linalg.norm(offset), 1e-6), -1, 1)))
+    yaw = base_yaw + float(settings["yaw"])
+    pitch = np.clip(base_pitch + float(settings["pitch"]), -1.45, 1.45)
+    eye = target + radius * np.array([
+        math.cos(pitch) * math.sin(yaw), math.sin(pitch),
+        math.cos(pitch) * math.cos(yaw)
+    ], dtype=np.float32)
+
+    forward = target - eye
+    forward /= np.linalg.norm(forward) + 1e-8
+    world_up = np.array([0, 1, 0], dtype=np.float32)
+    right = np.cross(forward, world_up)
+    if np.linalg.norm(right) < 1e-5:
+        world_up = np.array([0, 0, 1], dtype=np.float32)
+        right = np.cross(forward, world_up)
+    right /= np.linalg.norm(right) + 1e-8
+    down = np.cross(forward, right)
+    roll = float(settings.get("roll", 0.0))
+    if roll:
+        cos_roll, sin_roll = math.cos(roll), math.sin(roll)
+        original_right, original_down = right.copy(), down.copy()
+        right = cos_roll * original_right + sin_roll * original_down
+        down = -sin_roll * original_right + cos_roll * original_down
+    rotation = np.stack([right, down, forward], axis=0)
+    translation = -rotation @ eye
+    w2v = np.eye(4, dtype=np.float32)
+    w2v[:3, :3] = rotation
+    w2v[:3, 3] = translation
+    world_view = torch.tensor(w2v).transpose(0, 1).cuda()
+
+    fov_scale = float(settings["fov_scale"])
+    fovx = min(float(base_camera.FoVx) * fov_scale, math.radians(150))
+    fovy = min(2 * math.atan(math.tan(fovx / 2) * height / width), math.radians(150))
+    projection = getProjectionMatrix(
+        znear=base_camera.znear, zfar=base_camera.zfar, fovX=fovx, fovY=fovy
+    ).transpose(0, 1).cuda()
+    return MiniCam(width, height, fovy, fovx, base_camera.znear,
+                   base_camera.zfar, world_view, world_view @ projection)
+
+
+def _geometry_colors(gaussians):
+    """High-contrast scale encoding that exposes individual Gaussian splats."""
+    scale = gaussians.get_scaling.detach().mean(dim=1)
+    lo, hi = torch.quantile(scale, 0.05), torch.quantile(scale, 0.95)
+    value = ((scale - lo) / (hi - lo + 1e-8)).clamp(0, 1)
+    return torch.stack((0.18 + 0.82 * value, 0.95 - 0.62 * value,
+                        0.95 * (1.0 - value)), dim=1)
+
+
+def _render_web_pair(base_camera, target, settings, width, height, gaussians,
+                     specular_mlp, pipe, background, mult, use_asg,
+                     capture_all=False):
+    """Render synchronized geometry/RGB frames for live and final-viewer modes."""
+    component = str(settings.get("rgb_component", "render"))
+    # A residual is only meaningful when prediction and GT use the exact same
+    # calibrated camera. Orbit controls intentionally do not affect this mode.
+    orbit_cam = _make_orbit_camera(base_camera, target, settings, width, height)
+    viewer_cam = base_camera if component == "residual_remaining" else orbit_cam
+
+    def full_render(camera):
+        viewer_xyz = gaussians.get_xyz
+        viewer_dir = viewer_xyz - camera.camera_center
+        viewer_dir = viewer_dir / (viewer_dir.norm(dim=1, keepdim=True) + 1e-6)
+        viewer_normal = gaussians.get_normal_axis(viewer_dir)
+        viewer_spec = None
+        if use_asg:
+            viewer_spec = specular_mlp.step(
+                gaussians.get_asg_features, viewer_dir, viewer_normal
+            )
+        return render_fastgs(
+            camera, gaussians, pipe, background, mult, mlp_color=viewer_spec
+        )["render"]
+
+    full_frame = full_render(viewer_cam)
+    sh_frame = None
+    if component in {"sh_only", "asg_only"} or capture_all:
+        sh_frame = render_fastgs(
+            viewer_cam, gaussians, pipe, background, mult, mlp_color=None
+        )["render"]
+    if component == "sh_only":
+        rgb_frame = sh_frame
+    elif component == "asg_only":
+        rgb_frame = (full_frame - sh_frame).clamp_min(0.0)
+    elif component == "residual_remaining":
+        rgb_frame = (base_camera.original_image[:3].cuda() - full_frame).clamp_min(0.0)
+    else:
+        rgb_frame = full_frame
+    geometry_opacity = torch.full_like(
+        gaussians.get_opacity, float(settings["geometry_opacity"])
+    )
+    geometry_frame = render_fastgs(
+        orbit_cam, gaussians, pipe,
+        torch.tensor([0.015, 0.02, 0.022], device="cuda"), mult,
+        scaling_modifier=float(settings["splat_scale"]),
+        override_color=_geometry_colors(gaussians),
+        opacity_override=geometry_opacity,
+    )["render"]
+    rgb_jpeg = _tensor_to_jpeg(rgb_frame)
+    geometry_jpeg = _tensor_to_jpeg(geometry_frame)
+    captures = None
+    if capture_all:
+        # Timeline RGB/SH/ASG use the orbit pose captured at this iteration.
+        # Residual uses its calibrated dataset pose so prediction and GT align.
+        if viewer_cam is not orbit_cam:
+            orbit_full = full_render(orbit_cam)
+            orbit_sh = render_fastgs(
+                orbit_cam, gaussians, pipe, background, mult, mlp_color=None
+            )["render"]
+        else:
+            orbit_full, orbit_sh = full_frame, sh_frame
+        exact_full = full_frame if viewer_cam is base_camera else full_render(base_camera)
+        residual = (base_camera.original_image[:3].cuda() - exact_full).clamp_min(0.0)
+        captures = {
+            "render": _tensor_to_jpeg(orbit_full),
+            "sh_only": _tensor_to_jpeg(orbit_sh),
+            "asg_only": _tensor_to_jpeg((orbit_full - orbit_sh).clamp_min(0.0)),
+            "residual_remaining": _tensor_to_jpeg(residual),
+            "geometry": geometry_jpeg,
+        }
+    return rgb_jpeg, geometry_jpeg, captures
+
+
+def _write_web_live(live_dir, iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg, phase="training"):
+    for name, encoded in (("rgb", rgb_jpeg), ("geometry", geometry_jpeg)):
+        live_path = os.path.join(live_dir, name + ".jpg")
+        temporary_path = live_path + ".tmp"
+        with open(temporary_path, "wb") as frame_file:
+            frame_file.write(encoded)
+        os.replace(temporary_path, live_path)
+    telemetry_path = os.path.join(live_dir, "telemetry.json")
+    telemetry_tmp = telemetry_path + ".tmp"
+    with open(telemetry_tmp, "w") as telemetry_file:
+        json.dump({
+            "type": "frame", "iteration": iteration,
+            "gaussian_count": gaussian_count,
+            "vram_allocated_mib": round(allocated_mib, 2),
+            "vram_reserved_mib": round(reserved_mib, 2),
+            "phase": phase, "frame_id": time.time_ns(),
+        }, telemetry_file)
+    os.replace(telemetry_tmp, telemetry_path)
+
+
+def _merged_web_settings(web_viewer, settings_path):
+    settings = web_viewer.poll_settings()
+    if os.path.isfile(settings_path):
+        try:
+            with open(settings_path, "r") as settings_file:
+                settings.update(json.load(settings_file))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return settings
 def build_ref_score_confidence(ref_score, opt):
     """
     Keep broad RefScore for densification, but derive a conservative confidence
     map for supervision/masking where false positives are more damaging.
     """
-    conf = ref_score.detach().float().clamp(0.0, 1.0)
+    conf = prior_to_cuda(ref_score).detach().float().clamp(0.0, 1.0)
     if conf.numel() == 0 or conf.max() <= 0:
         return conf
 
@@ -78,64 +250,170 @@ def build_ref_score_confidence(ref_score, opt):
 
 def get_ref_score_confidence(cam, opt):
     if hasattr(cam, "ref_score_conf"):
-        return cam.ref_score_conf.cuda()
+        return prior_to_cuda(cam.ref_score_conf)
     if hasattr(cam, "ref_score"):
-        return build_ref_score_confidence(cam.ref_score.cuda(), opt)
+        return build_ref_score_confidence(cam.ref_score, opt)
     return None
 
 
-def update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration):
+def _normalize_adaptive_residual(residual, static_score, opt):
+    """Robustly normalize full-model error only inside RefScore support."""
+    valid = static_score > 0
+    if not torch.any(valid):
+        return torch.zeros_like(residual)
+
+    values = residual[valid]
+    low_q = float(getattr(opt, "adaptive_residual_low_quantile", 0.70))
+    high_q = float(getattr(opt, "adaptive_residual_high_quantile", 0.95))
+    low = torch.quantile(values, low_q)
+    high = torch.quantile(values, high_q)
+    if high <= low + 1e-6:
+        return torch.zeros_like(residual)
+    normalized = ((residual - low) / (high - low + 1e-6)).clamp(0.0, 1.0)
+    return normalized * valid.float()
+
+
+def _update_camera_adaptive_map(cam, residual, opt):
+    """Update one camera's persistent error for adaptive supervision."""
+    static_score = prior_to_cuda(cam.ref_score_static)
+    residual_norm = _normalize_adaptive_residual(residual, static_score, opt)
+
+    if hasattr(cam, "adaptive_error_ema"):
+        old_error = prior_to_cuda(cam.adaptive_error_ema)
+        ema = float(opt.adaptive_prior_ema)
+        persistent_error = ema * old_error + (1.0 - ema) * residual_norm
+    else:
+        # Do not dilute the first observation with an implicit zero map.
+        persistent_error = residual_norm
+
+    persistent_error = persistent_error.clamp(0.0, 1.0)
+    encoded_error = (persistent_error * 255.0).round().byte().cpu()
+    cam.adaptive_error_ema = encoded_error
+    cam.adaptive_difficulty = encoded_error.clone()
+
+    # Camera-level score for reflection-aware hard-view replay. Use a robust
+    # mean of joint reflection confidence and persistent reconstruction error;
+    # isolated outlier pixels cannot dominate the sampling distribution.
+    if hasattr(cam, "ref_score_conf_static"):
+        ref_confidence = prior_to_cuda(cam.ref_score_conf_static).pow(1.5)
+    else:
+        ref_confidence = static_score.pow(1.5)
+    joint_difficulty = ref_confidence * persistent_error
+    valid_values = joint_difficulty[ref_confidence > 0]
+    camera_score = 0.0
+    if valid_values.numel() > 0:
+        low_q = float(getattr(opt, "reflection_sampling_score_low_quantile", 0.70))
+        high_q = float(getattr(opt, "reflection_sampling_score_high_quantile", 0.95))
+        low = torch.quantile(valid_values, low_q)
+        high = torch.quantile(valid_values, high_q)
+        robust_values = valid_values[(valid_values >= low) & (valid_values <= high)]
+        if robust_values.numel() > 0:
+            camera_score = robust_values.mean().item()
+    cam.reflection_sampling_score = max(float(camera_score), 0.0)
+
+    # The successful Adaptive-Loss design leaves geometric coverage exactly
+    # at the static RefScore. Non-unit bounds are supported only so the earlier
+    # coverage ablation remains reproducible.
+    floor = float(getattr(opt, "adaptive_prior_floor", 1.0))
+    ceiling = float(getattr(opt, "adaptive_prior_ceiling", 1.0))
+    if abs(floor - 1.0) > 1e-8 or abs(ceiling - 1.0) > 1e-8:
+        modulation = floor + (ceiling - floor) * persistent_error
+        effective_score = (static_score * modulation).clamp(0.0, 1.0)
+        cam.ref_score = (effective_score * 255.0).round().byte().cpu()
+
+
+def reflection_sampling_ratio(iteration, opt):
+    """Scheduled probability of replaying a hard reflective training view."""
+    if not getattr(opt, "use_reflection_view_sampling", False):
+        return 0.0
+    start = int(opt.reflection_sampling_start)
+    peak_end = int(opt.reflection_sampling_peak_end)
+    end = int(opt.reflection_sampling_end)
+    maximum = float(opt.reflection_sampling_ratio)
+    if iteration < start or iteration >= end:
+        return 0.0
+    if iteration < peak_end:
+        return maximum
+    decay = (iteration - peak_end) / max(end - peak_end, 1)
+    return maximum * max(1.0 - decay, 0.0)
+
+
+def sample_training_camera(viewpoint_stack, viewpoint_indices, all_cameras,
+                           iteration, opt):
+    """Mix coverage-preserving uniform sampling with hard-view replay."""
+    ratio = reflection_sampling_ratio(iteration, opt)
+    prioritized = False
+    selected_score = 0.0
+
+    if ratio > 0.0 and torch.rand((), device="cpu").item() < ratio:
+        scores = torch.tensor([
+            max(float(getattr(cam, "reflection_sampling_score", 0.0)), 0.0)
+            for cam in all_cameras
+        ], dtype=torch.float64)
+        if scores.sum() > 0:
+            temperature = max(float(opt.reflection_sampling_temperature), 1e-3)
+            weights = (scores + 1e-12).pow(1.0 / temperature)
+            selected = int(torch.multinomial(weights, 1).item())
+            cam = all_cameras[selected]
+            prioritized = True
+            selected_score = float(scores[selected].item())
+            # Deliberately do not pop from viewpoint_stack: prioritized samples
+            # are additional replays, while uniform steps still cover every view.
+            return cam, prioritized, selected_score, ratio
+
+    idx = randint(0, len(viewpoint_indices) - 1)
+    cam = viewpoint_stack.pop(idx)
+    viewpoint_indices.pop(idx)
+    selected_score = float(getattr(cam, "reflection_sampling_score", 0.0))
+    return cam, prioritized, selected_score, ratio
+
+
+def update_adaptive_ref_scores(cameras, gaussians, specular_mlp, pipe,
+                               background, opt, iteration):
+    """Legacy coverage-ablation update using full SH+ASG residuals.
+
+    The validated Adaptive-Loss default does not call this extra render path.
+    It remains available only when non-unit coverage bounds are explicitly set,
+    so the negative coverage experiment can still be reproduced.
+    """
     if not getattr(opt, 'use_ref_score', False) or not getattr(opt, 'use_adaptive_prior', False):
         return 0
     if iteration < opt.adaptive_prior_start:
         return 0
+    if iteration >= getattr(opt, 'adaptive_prior_end', opt.densify_until_iter):
+        return 0
     if iteration % opt.adaptive_prior_interval != 0:
         return 0
 
-    train_cams = scene.getTrainCameras().copy()
-    num_cameras = getattr(opt, 'adaptive_prior_num_cameras', 20)
-    if num_cameras > 0 and num_cameras < len(train_cams):
-        train_cams = sampling_cameras(train_cams, num_cameras)
-
     updated = 0
     with torch.no_grad():
-        for cam in train_cams:
+        for cam in cameras:
             if not hasattr(cam, 'ref_score_static'):
                 continue
 
-            # Render base/SH only, matching compute_gaussian_score_fastgs().
-            # This residual marks regions not yet explained by the base model.
+            # Measure what the complete model still gets wrong.  An SH-only
+            # residual would keep marking highlights even after ASG learned them.
+            xyz = gaussians.get_xyz
+            viewdir = xyz - cam.camera_center
+            viewdir = viewdir / (viewdir.norm(dim=1, keepdim=True) + 1e-6)
+            normal = gaussians.get_normal_axis(viewdir)
+            mlp_color = None
+            if specular_mlp is not None:
+                mlp_color = specular_mlp.step(
+                    gaussians.get_asg_features, viewdir, normal.detach()
+                )
             render_img = render_fastgs(
                 cam,
                 gaussians,
                 pipe,
                 background,
                 opt.mult,
-                mlp_color=None
+                mlp_color=mlp_color
             )["render"]
 
             gt = cam.original_image.cuda()
             residual = torch.abs(render_img - gt).mean(dim=0)
-            robust_max = torch.quantile(residual.flatten(), 0.95)
-            residual_norm = (residual / (robust_max + 1e-6)).clamp(0.0, 1.0)
-
-            adaptive = residual_norm * cam.ref_score_static
-            adaptive_max = adaptive.max()
-            if adaptive_max > 0:
-                adaptive = adaptive / (adaptive_max + 1e-6)
-
-            alpha = opt.adaptive_prior_ema
-            cam.ref_score = (alpha * cam.ref_score + (1.0 - alpha) * adaptive).detach()
-            if hasattr(cam, "ref_score_conf_static"):
-                adaptive_conf = residual_norm * cam.ref_score_conf_static
-                adaptive_conf_max = adaptive_conf.max()
-                if adaptive_conf_max > 0:
-                    adaptive_conf = adaptive_conf / (adaptive_conf_max + 1e-6)
-                cam.ref_score_conf = (
-                    alpha * cam.ref_score_conf + (1.0 - alpha) * adaptive_conf
-                ).detach()
-            else:
-                cam.ref_score_conf = build_ref_score_confidence(cam.ref_score, opt)
+            _update_camera_adaptive_map(cam, residual, opt)
             updated += 1
 
     if updated:
@@ -152,26 +430,59 @@ def training(dataset, opt, pipe):
     start_time = time.time()
     tb_writer = prepare_output_and_logger(dataset)
 
+    # Reflection-aware sampling consumes the persistent scores maintained by
+    # Adaptive Prior. Keep the public interface safe when the sampling flag is
+    # used on its own.
+    if (getattr(opt, "use_reflection_view_sampling", False)
+            and not getattr(opt, "use_adaptive_prior", False)):
+        opt.use_adaptive_prior = True
+        print("[Reflection Sampling] enabling --use_adaptive_prior automatically")
+
+    # Adaptive Prior is a refinement of Reflection Score.  Make the public
+    # interface unambiguous: --use_adaptive_prior is sufficient to enable the
+    # complete feature with its validated defaults.
+    if getattr(opt, "use_adaptive_prior", False) and not opt.use_ref_score:
+        opt.use_ref_score = True
+        print("[Adaptive Prior] enabling --use_ref_score automatically")
+
     # ------------------------------------------------------------
     # INIT MODELS
     # ------------------------------------------------------------
 
-    gaussians = GaussianModel(dataset.sh_degree, dataset.asg_degree, opt.optimizer_type)
+    use_asg = bool(getattr(dataset, "use_asg", True))
+    print(f"[SH-ASG Ablation] use_asg={use_asg}")
+    use_vcd = bool(getattr(dataset, "use_vcd", True))
+    use_vcp = bool(getattr(dataset, "use_vcp", True))
+    use_compact_box = bool(getattr(dataset, "use_compact_box", True))
+    # beta=0.5 is FastGS Compact Box. beta=1.0 removes its support shrinkage
+    # while retaining the same rasterizer, which isolates the intended ablation.
+    opt.mult = opt.mult if use_compact_box else 1.0
+    print(
+        "[FastGS Ablation] "
+        f"VCD={use_vcd}, VCP={use_vcp}, CompactBox={use_compact_box}, beta={opt.mult}"
+    )
+    gaussians = GaussianModel(
+        dataset.sh_degree,
+        dataset.asg_degree if use_asg else 0,
+        opt.optimizer_type,
+    )
+    gaussians.asg_enabled = use_asg
     scene = Scene(dataset, gaussians)
     initial_gaussians = gaussians.get_xyz.shape[0]
     configure_refscore_budget(opt, initial_gaussians)
     gaussians.training_setup(opt)
-
-    specular_mlp = SpecularModel(
-        dataset.asg_degree,
-        dataset.is_real,
-        dataset.is_indoor,
-        getattr(dataset, "asg_num_theta", -1),
-        getattr(dataset, "asg_num_phi", -1),
-        getattr(dataset, "specular_hidden", -1),
-        getattr(dataset, "specular_layers", -1),
-    )
-    specular_mlp.train_setting(opt)
+    specular_mlp = None
+    if use_asg:
+        specular_mlp = SpecularModel(
+            dataset.asg_degree,
+            dataset.is_real,
+            dataset.is_indoor,
+            getattr(dataset, "asg_num_theta", -1),
+            getattr(dataset, "asg_num_phi", -1),
+            getattr(dataset, "specular_hidden", -1),
+            getattr(dataset, "specular_layers", -1),
+        )
+        specular_mlp.train_setting(opt)
 
     # ------------------------------------------------------------
     # BG
@@ -179,6 +490,41 @@ def training(dataset, opt, pipe):
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    # ------------------------------------------------------------
+    # OPTIONAL LIVE WEB VIEWER
+    # ------------------------------------------------------------
+    web_viewer = None
+    web_stats = []
+    web_base_camera = None
+    web_cameras = []
+    web_target = None
+    web_frames_dir = os.path.join(scene.model_path, "web_viewer_frames")
+    web_live_dir = os.path.join(scene.model_path, "web_viewer_live")
+    web_settings_path = os.path.join(scene.model_path, "web_viewer_settings.json")
+    if getattr(opt, "web_viewer", False):
+        viewer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web-viewer")
+        if viewer_dir not in sys.path:
+            sys.path.insert(0, viewer_dir)
+        from server import ViewerServer
+        web_viewer = ViewerServer(opt.web_host, opt.web_http_port, opt.web_ws_port)
+        web_viewer.configure(
+            interval=opt.web_stream_interval,
+            save_frames=opt.web_save_frames,
+        )
+        web_viewer.start()
+        web_cameras = scene.getTrainCameras()
+        web_base_camera = web_cameras[0]
+        web_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+        os.makedirs(web_frames_dir, exist_ok=True)
+        os.makedirs(web_live_dir, exist_ok=True)
+        with open(os.path.join(scene.model_path, "web_viewer_manifest.json"), "w") as manifest_file:
+            json.dump({
+                "cameras": [
+                    {"index": index, "image_name": camera.image_name}
+                    for index, camera in enumerate(web_cameras)
+                ]
+            }, manifest_file, indent=2)
 
     # ------------------------------------------------------------
     # LOAD REFLECTION PRIORS (If available)
@@ -189,15 +535,15 @@ def training(dataset, opt, pipe):
         prior_img = imageio.imread(path)
         if len(prior_img.shape) == 3:
             prior_img = prior_img[..., 0]
-        prior_tensor = torch.tensor(prior_img / 255.0, dtype=torch.float32).cuda()
+        prior_tensor = torch.as_tensor(prior_img, dtype=torch.uint8, device="cpu")
         if prior_tensor.shape[0] != cam.image_height or prior_tensor.shape[1] != cam.image_width:
             prior_tensor = torch.nn.functional.interpolate(
-                prior_tensor.unsqueeze(0).unsqueeze(0),
+                prior_tensor.float().unsqueeze(0).unsqueeze(0),
                 size=(cam.image_height, cam.image_width),
                 mode='bilinear',
                 align_corners=False
-            ).squeeze()
-        return prior_tensor
+            ).squeeze().round().clamp(0, 255).byte()
+        return prior_tensor.contiguous()
 
     if opt.use_ref_score and os.path.exists(ref_prior_dir):
         print("Loading Reflection Priors...")
@@ -212,13 +558,15 @@ def training(dataset, opt, pipe):
                     cam.ref_score_static = ref_tensor.clone()
                     conf_path = os.path.join(ref_prior_dir, f"{cam.image_name}_ref_conf.png")
                     if os.path.exists(conf_path):
-                        cam.ref_score_conf = load_prior_tensor(conf_path, cam).clamp(0.0, 1.0)
+                        cam.ref_score_conf = load_prior_tensor(conf_path, cam)
                     else:
-                        cam.ref_score_conf = build_ref_score_confidence(ref_tensor, opt)
+                        conf = build_ref_score_confidence(ref_tensor, opt)
+                        cam.ref_score_conf = (conf.clamp(0.0, 1.0) * 255.0).byte().cpu()
                     cam.ref_score_conf_static = cam.ref_score_conf.clone()
                     loaded_ref_priors += 1
-                except Exception:
-                    pass
+                except Exception as error:
+                    missing_ref_priors += 1
+                    print(f"[Reflection Prior] Failed to load {npath}: {error}")
             else:
                 missing_ref_priors += 1
         print(f"Loaded {loaded_ref_priors} reflection priors; missing {missing_ref_priors}.")
@@ -232,6 +580,19 @@ def training(dataset, opt, pipe):
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
 
+    save_iterations = {int(opt.iterations)}
+    checkpoint_interval = max(0, int(getattr(opt, "checkpoint_interval", 0)))
+    if checkpoint_interval:
+        save_iterations.update(range(checkpoint_interval, opt.iterations + 1,
+                                     checkpoint_interval))
+    checkpoint_text = str(getattr(opt, "checkpoint_iterations", "") or "")
+    for value in checkpoint_text.split(","):
+        if value.strip():
+            checkpoint = int(value.strip())
+            if 1 <= checkpoint <= opt.iterations:
+                save_iterations.add(checkpoint)
+    print("Model checkpoints:", ", ".join(map(str, sorted(save_iterations))))
+
     progress_bar = tqdm(range(1, opt.iterations + 1), desc="Training")
     ema_loss = 0.0
 
@@ -241,8 +602,10 @@ def training(dataset, opt, pipe):
     prev_vis_mask: torch.Tensor | None = None
     asg_eval_count_total = 0
     asg_eval_steps = 0
-    sh_spec_mask_ratio_total = 0.0
-    sh_spec_mask_steps = 0
+    reflection_sampling_priority_steps = 0
+    reflection_sampling_ratio_total = 0.0
+    reflection_sampling_selected_score_total = 0.0
+    reflection_sampling_active_steps = 0
     spec_reg_loss_total = 0.0
     spec_reg_steps = 0
 
@@ -261,9 +624,19 @@ def training(dataset, opt, pipe):
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
 
-        idx = randint(0, len(viewpoint_indices) - 1)
-        cam = viewpoint_stack.pop(idx)
-        viewpoint_indices.pop(idx)
+        cam, prioritized_view, selected_view_score, sampling_ratio = sample_training_camera(
+            viewpoint_stack,
+            viewpoint_indices,
+            scene.getTrainCameras(),
+            iteration,
+            opt,
+        )
+        if sampling_ratio > 0.0:
+            reflection_sampling_active_steps += 1
+            reflection_sampling_ratio_total += sampling_ratio
+        if prioritized_view:
+            reflection_sampling_priority_steps += 1
+            reflection_sampling_selected_score_total += selected_view_score
 
         # --------------------------------------------------------
         # COMPUTE VIEWDIR + NORMAL
@@ -290,7 +663,7 @@ def training(dataset, opt, pipe):
         vis_indices: torch.Tensor | None = None   # indices of evaluated Gaussians
         mlp_color: torch.Tensor | None = None     # full-scene buffer  [N, 3]
 
-        if iteration > opt.specular_start_iter:
+        if use_asg and iteration > opt.specular_start_iter:
             n_gs = gaussians.get_xyz.shape[0]
             asg_feat = gaussians.get_asg_features  # [N, asg_degree]
             force_full_asg = (
@@ -321,19 +694,6 @@ def training(dataset, opt, pipe):
                     (n_gs, 3), device="cuda"
                 ).index_put((vis_indices,), spec_sparse)
 
-        collect_sh_spec_mask = (
-            getattr(opt, "use_sh_spec_mask", False)
-            and iteration >= getattr(opt, "sh_spec_mask_start", 0)
-            and hasattr(cam, "ref_score")
-        )
-        collect_ref_conf_projection = collect_sh_spec_mask
-        sh_spec_metric_map = None
-        if collect_ref_conf_projection:
-            ref_conf = get_ref_score_confidence(cam, opt)
-            sh_spec_metric_map = (
-                ref_conf > opt.sh_spec_mask_threshold
-            ).reshape(-1).int()
-
         # --------------------------------------------------------
         # RENDER  (single pass — Phase A removes redundant sh & spec-sharp passes)
         # --------------------------------------------------------
@@ -345,8 +705,6 @@ def training(dataset, opt, pipe):
             background,
             opt.mult,
             mlp_color=mlp_color,
-            get_flag=collect_ref_conf_projection,
-            metric_map=sh_spec_metric_map,
         )
 
         image                 = render_pkg["render"]
@@ -354,18 +712,6 @@ def training(dataset, opt, pipe):
         visibility_filter     = render_pkg["visibility_filter"]
         radii                 = render_pkg["radii"]
         accum_metric_counts   = render_pkg["accum_metric_counts"]
-
-        sh_spec_grad_mask = None
-        projected_ref_conf_mask = None
-        if collect_ref_conf_projection and accum_metric_counts is not None:
-            mask_counts = accum_metric_counts.reshape(-1)
-            if mask_counts.shape[0] == gaussians.get_xyz.shape[0]:
-                projected_ref_conf_mask = mask_counts >= opt.sh_spec_min_metric_count
-                if collect_sh_spec_mask:
-                    sh_spec_grad_mask = projected_ref_conf_mask
-                if sh_spec_grad_mask is not None and sh_spec_grad_mask.numel() > 0:
-                    sh_spec_mask_ratio_total += sh_spec_grad_mask.float().mean().item()
-                    sh_spec_mask_steps += 1
 
         # ── Update cached visibility mask for the NEXT iteration ──────────
         # radii has shape [N]; (radii > 0) gives the boolean visibility mask.
@@ -385,13 +731,34 @@ def training(dataset, opt, pipe):
 
         gt = cam.original_image.cuda()
 
-        if (
-            getattr(opt, "lambda_spec_l1_weight", 0.0) > 0.0
-            and hasattr(cam, "ref_score")
-        ):
-            pixel_l1 = torch.abs(image - gt)
+        adaptive_active = (
+            getattr(opt, "use_adaptive_prior", False)
+            and hasattr(cam, "ref_score_static")
+            and iteration >= opt.adaptive_prior_start
+            and iteration < getattr(opt, "adaptive_prior_end", opt.densify_until_iter)
+        )
+        if adaptive_active:
+            # Reuse the current training render: this gives all training views
+            # temporal coverage without an additional renderer invocation.
+            with torch.no_grad():
+                current_residual = torch.abs(image.detach() - gt).mean(dim=0)
+                _update_camera_adaptive_map(cam, current_residual, opt)
+
+        weight_map = None
+        if adaptive_active and hasattr(cam, "adaptive_difficulty"):
+            difficulty = prior_to_cuda(cam.adaptive_difficulty).unsqueeze(0)
+            adaptive_strength = float(getattr(opt, "adaptive_loss_strength", 0.15))
+            weight_map = 1.0 + adaptive_strength * difficulty
+
+        if getattr(opt, "lambda_spec_l1_weight", 0.0) > 0.0 and hasattr(cam, "ref_score"):
             ref_w = get_ref_score_confidence(cam, opt).unsqueeze(0)
-            weight_map = 1.0 + opt.lambda_spec_l1_weight * ref_w
+            spec_weight = 1.0 + opt.lambda_spec_l1_weight * ref_w
+            weight_map = spec_weight if weight_map is None else weight_map * spec_weight
+
+        if weight_map is not None:
+            pixel_l1 = torch.abs(image - gt)
+            # Keep the global loss scale stable; only redistribute gradients.
+            weight_map = weight_map / weight_map.mean().clamp_min(1e-6)
             Ll1 = (pixel_l1 * weight_map).sum() / (3.0 * weight_map.sum().clamp_min(1e-6))
         else:
             Ll1 = l1_loss(image, gt)
@@ -423,13 +790,12 @@ def training(dataset, opt, pipe):
         gaussians.optimizer_step(
             iteration,
             skip_sh=skip_sh,
-            f_rest_grad_mask=sh_spec_grad_mask,
-            f_rest_grad_scale=opt.sh_spec_grad_scale,
         )
 
         # Update specular lr BEFORE stepping optimizer to ensure non-zero lr is used
-        specular_mlp.update_learning_rate(iteration)
-        specular_mlp.optimizer_step()
+        if use_asg:
+            specular_mlp.update_learning_rate(iteration)
+            specular_mlp.optimizer_step()
 
         # --------------------------------------------------------
         # LOG
@@ -439,8 +805,6 @@ def training(dataset, opt, pipe):
 
         if iteration % 10 == 0:
             progress_bar.set_postfix({"loss": f"{ema_loss:.6f}"})
-
-        update_adaptive_ref_scores(scene, gaussians, pipe, background, opt, iteration)
 
         # --------------------------------------------------------
         # DENSIFY (FASTGS)
@@ -473,28 +837,55 @@ def training(dataset, opt, pipe):
                 iteration % opt.densification_interval == 0
             ):
                 size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
-
-                with torch.no_grad():
-                    importance_score, pruning_score = compute_gaussian_score_fastgs(
-                        camlist, gaussians, pipe, background, opt, DENSIFY=True, iteration=iteration
+                if use_vcd:
+                    score_camera_count = opt.num_score_cameras
+                    if getattr(opt, "use_adaptive_prior", False):
+                        score_camera_count = getattr(
+                            opt, "adaptive_prior_num_cameras", score_camera_count
+                        )
+                    camlist = sampling_cameras(
+                        scene.getTrainCameras().copy(), score_camera_count
                     )
 
-                gaussians.densify_and_prune_fastgs(
-                    max_screen_size=size_threshold,
-                    min_opacity=0.005,
-                    extent=scene.cameras_extent,
-                    radii=radii,
-                    args=opt,
-                    importance_score=importance_score,
-                    pruning_score=pruning_score
-                )
+                    adaptive_coverage_enabled = (
+                        getattr(opt, "use_adaptive_prior", False)
+                        and (
+                            abs(float(getattr(opt, "adaptive_prior_floor", 1.0)) - 1.0) > 1e-8
+                            or abs(float(getattr(opt, "adaptive_prior_ceiling", 1.0)) - 1.0) > 1e-8
+                        )
+                    )
+                    with torch.no_grad():
+                        if adaptive_coverage_enabled:
+                            update_adaptive_ref_scores(
+                                camlist, gaussians, specular_mlp, pipe, background,
+                                opt, iteration
+                            )
+                        importance_score, pruning_score = compute_gaussian_score_fastgs(
+                            camlist, gaussians, pipe, background, opt,
+                            DENSIFY=True, iteration=iteration
+                        )
+
+                    gaussians.densify_and_prune_fastgs(
+                        max_screen_size=size_threshold,
+                        min_opacity=0.005,
+                        extent=scene.cameras_extent,
+                        radii=radii,
+                        args=opt,
+                        importance_score=importance_score,
+                        pruning_score=pruning_score
+                    )
+                else:
+                    gaussians.densify_and_prune_baseline(
+                        opt.densify_grad_threshold, 0.005,
+                        scene.cameras_extent, size_threshold, radii
+                    )
 
             if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                 gaussians.reset_opacity()
 
         # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
-        if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
+        if (use_vcp and iteration % 3000 == 0
+                and iteration > 15_000 and iteration < 30_000):
             camlist = sampling_cameras(scene.getTrainCameras().copy(), opt.num_score_cameras)
             with torch.no_grad():
                 _, pruning_score = compute_gaussian_score_fastgs(
@@ -503,15 +894,75 @@ def training(dataset, opt, pipe):
             gaussians.final_prune_fastgs(min_opacity=0.1, pruning_score=pruning_score)
 
         # --------------------------------------------------------
+        # LIVE VIEWER + PER-ITERATION TELEMETRY
+        # --------------------------------------------------------
+        if web_viewer is not None:
+            settings = _merged_web_settings(web_viewer, web_settings_path)
+            while settings["paused"]:
+                time.sleep(0.05)
+                settings = _merged_web_settings(web_viewer, web_settings_path)
+
+            torch.cuda.synchronize()
+            allocated_mib = torch.cuda.memory_allocated() / (1024 ** 2)
+            reserved_mib = torch.cuda.memory_reserved() / (1024 ** 2)
+            gaussian_count = int(gaussians.get_xyz.shape[0])
+            web_stats.append({
+                "iteration": iteration,
+                "gaussian_count": gaussian_count,
+                "vram_allocated_mib": round(allocated_mib, 2),
+                "vram_reserved_mib": round(reserved_mib, 2),
+            })
+
+            interval = max(1, int(settings["interval"]))
+            record_interval = max(1, int(settings.get("record_interval", 50)))
+            record_due = (bool(settings.get("save_frames", False))
+                          and iteration % record_interval == 0)
+            should_render_web = iteration % interval == 0 or record_due
+            if should_render_web:
+                camera_index = max(0, min(
+                    len(web_cameras) - 1, int(settings.get("camera_index", 0))
+                ))
+                web_base_camera = web_cameras[camera_index]
+                with torch.no_grad():
+                    rgb_jpeg, geometry_jpeg, timeline_frames = _render_web_pair(
+                        web_base_camera, web_target, settings,
+                        opt.web_width, opt.web_height, gaussians,
+                        specular_mlp, pipe, background, opt.mult,
+                        use_asg and iteration > opt.specular_start_iter,
+                        capture_all=record_due,
+                    )
+
+                web_viewer.publish(iteration, gaussian_count, allocated_mib,
+                                   reserved_mib, rgb_jpeg, geometry_jpeg)
+                _write_web_live(
+                    web_live_dir, iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg,
+                )
+                if record_due and timeline_frames:
+                    for name, encoded in timeline_frames.items():
+                        folder = os.path.join(web_frames_dir, name)
+                        os.makedirs(folder, exist_ok=True)
+                        with open(os.path.join(folder, f"{iteration:06d}.jpg"), "wb") as frame_file:
+                            frame_file.write(encoded)
+
+            if iteration % 100 == 0 or iteration == opt.iterations:
+                with open(os.path.join(scene.model_path, "web_viewer_stats.json"), "w") as stats_file:
+                    json.dump({
+                        "camera_image": web_base_camera.image_name,
+                        "samples": web_stats,
+                    }, stats_file, indent=2)
+
+        # --------------------------------------------------------
         # SAVE
         # --------------------------------------------------------
 
-        if iteration in [17000, opt.iterations]:
+        if iteration in save_iterations:
             print(f"[ITER {iteration}] Saving...")
-            scene.save(iteration)
+            scene.save(iteration, save_asg=use_asg)
 
             # ✅ QUAN TRỌNG NHẤT
-            specular_mlp.save_weights(scene.model_path, iteration)
+            if use_asg:
+                specular_mlp.save_weights(scene.model_path, iteration)
 
     # ------------------------------------------------------------
     # SAVE METADATA
@@ -521,7 +972,14 @@ def training(dataset, opt, pipe):
     minutes = int(duration // 60)
     seconds = int(duration % 60)
     avg_asg_eval_count = asg_eval_count_total / asg_eval_steps if asg_eval_steps > 0 else 0.0
-    avg_sh_spec_mask_ratio = sh_spec_mask_ratio_total / sh_spec_mask_steps if sh_spec_mask_steps > 0 else 0.0
+    avg_reflection_sampling_ratio = (
+        reflection_sampling_ratio_total / reflection_sampling_active_steps
+        if reflection_sampling_active_steps > 0 else 0.0
+    )
+    avg_prioritized_view_score = (
+        reflection_sampling_selected_score_total / reflection_sampling_priority_steps
+        if reflection_sampling_priority_steps > 0 else 0.0
+    )
     avg_spec_reg_loss = spec_reg_loss_total / spec_reg_steps if spec_reg_steps > 0 else 0.0
     heatmap_path = save_gaussian_view_heatmaps(
         scene.getTestCameras(),
@@ -538,6 +996,8 @@ def training(dataset, opt, pipe):
         "git_branch": get_git_branch(),
         "image_scale": dataset.images,
         "iterations": opt.iterations,
+        "saved_checkpoints": sorted(save_iterations),
+        "checkpoint_interval": checkpoint_interval,
         "initial_gaussians": initial_gaussians,
         "final_gaussians": gaussians.get_xyz.shape[0],
         "gaussian_heatmap_dir": os.path.relpath(heatmap_path, dataset.model_path) if heatmap_path else None,
@@ -545,6 +1005,15 @@ def training(dataset, opt, pipe):
         "training_time_formatted": f"{minutes}m {seconds}s",
         "peak_vram_mib": round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2),
         "asg_degree": dataset.asg_degree,
+        "use_asg": use_asg,
+        "use_vcd": use_vcd,
+        "use_vcp": use_vcp,
+        "use_compact_box": use_compact_box,
+        "compact_box_mult": opt.mult,
+        "highfeature_lr": opt.highfeature_lr,
+        "grad_abs_thresh": opt.grad_abs_thresh,
+        "densification_interval": opt.densification_interval,
+        "optimizer_type": opt.optimizer_type,
         "asg_num_theta": getattr(dataset, "asg_num_theta", -1),
         "asg_num_phi": getattr(dataset, "asg_num_phi", -1),
         "specular_hidden": getattr(dataset, "specular_hidden", -1),
@@ -562,14 +1031,21 @@ def training(dataset, opt, pipe):
         "refscore_min_strength": opt.refscore_min_strength,
         "refscore_threshold_min": opt.refscore_threshold_min,
         "refscore_threshold_max": opt.refscore_threshold_max,
+        "refscore_strength": opt.refscore_strength,
         "refscore_conf_quantile": opt.refscore_conf_quantile,
         "refscore_conf_gamma": opt.refscore_conf_gamma,
         "refscore_conf_min": opt.refscore_conf_min,
         "use_adaptive_prior": opt.use_adaptive_prior,
         "adaptive_prior_start": opt.adaptive_prior_start,
+        "adaptive_prior_end": opt.adaptive_prior_end,
         "adaptive_prior_interval": opt.adaptive_prior_interval,
         "adaptive_prior_num_cameras": opt.adaptive_prior_num_cameras,
         "adaptive_prior_ema": opt.adaptive_prior_ema,
+        "adaptive_prior_floor": opt.adaptive_prior_floor,
+        "adaptive_prior_ceiling": opt.adaptive_prior_ceiling,
+        "adaptive_residual_low_quantile": opt.adaptive_residual_low_quantile,
+        "adaptive_residual_high_quantile": opt.adaptive_residual_high_quantile,
+        "adaptive_loss_strength": opt.adaptive_loss_strength,
         "ref_prior_method": opt.ref_prior_method,
         "ti_thresh": opt.ti_thresh,
         "ti_bright": opt.ti_bright,
@@ -582,12 +1058,18 @@ def training(dataset, opt, pipe):
         "f_rest_interval_early": opt.f_rest_interval_early,
         "f_rest_interval_mid": opt.f_rest_interval_mid,
         "f_rest_interval_late": opt.f_rest_interval_late,
-        "use_sh_spec_mask": opt.use_sh_spec_mask,
-        "sh_spec_mask_threshold": opt.sh_spec_mask_threshold,
-        "sh_spec_grad_scale": opt.sh_spec_grad_scale,
-        "sh_spec_mask_start": opt.sh_spec_mask_start,
-        "sh_spec_min_metric_count": opt.sh_spec_min_metric_count,
-        "avg_sh_spec_mask_ratio": round(avg_sh_spec_mask_ratio, 6),
+        "use_reflection_view_sampling": opt.use_reflection_view_sampling,
+        "reflection_sampling_ratio": opt.reflection_sampling_ratio,
+        "reflection_sampling_start": opt.reflection_sampling_start,
+        "reflection_sampling_peak_end": opt.reflection_sampling_peak_end,
+        "reflection_sampling_end": opt.reflection_sampling_end,
+        "reflection_sampling_temperature": opt.reflection_sampling_temperature,
+        "reflection_sampling_score_low_quantile": opt.reflection_sampling_score_low_quantile,
+        "reflection_sampling_score_high_quantile": opt.reflection_sampling_score_high_quantile,
+        "reflection_sampling_priority_steps": reflection_sampling_priority_steps,
+        "reflection_sampling_active_steps": reflection_sampling_active_steps,
+        "avg_reflection_sampling_ratio": round(avg_reflection_sampling_ratio, 6),
+        "avg_prioritized_view_score": round(avg_prioritized_view_score, 8),
         "lambda_spec_l1_weight": opt.lambda_spec_l1_weight,
         "lambda_spec_reg": opt.lambda_spec_reg,
         "avg_spec_reg_loss": round(avg_spec_reg_loss, 8),
@@ -599,6 +1081,130 @@ def training(dataset, opt, pipe):
         json.dump(metadata, f, indent=4)
 
     print(f"Training metadata saved to {info_path}")
+
+    # ------------------------------------------------------------
+    # AUTOMATIC TEST RENDER + METRICS
+    # ------------------------------------------------------------
+    evaluation_status_path = os.path.join(scene.model_path, "evaluation_status.json")
+
+    def write_evaluation_status(status, phase, detail=""):
+        temporary = evaluation_status_path + ".tmp"
+        with open(temporary, "w") as status_file:
+            json.dump({"status": status, "phase": phase, "detail": detail,
+                       "iteration": opt.iterations}, status_file, indent=2)
+        os.replace(temporary, evaluation_status_path)
+
+    test_cameras = scene.getTestCameras()
+    if web_viewer is not None and test_cameras:
+        try:
+            write_evaluation_status("running", "Rendering test views",
+                                    f"0 / {len(test_cameras)} views")
+            print(f"Automatic evaluation: rendering {len(test_cameras)} test views...")
+            from render import render_set, save_fps_to_results
+            opt.use_asg = use_asg
+            test_fps = render_set(
+                scene.model_path, "test", opt.iterations, test_cameras,
+                gaussians, pipe, background, specular_mlp, opt
+            )
+            save_fps_to_results(scene.model_path, opt.iterations, test_fps)
+            write_evaluation_status("running", "Computing metrics",
+                                    "PSNR · SSIM · LPIPS · specular diagnostics")
+            from metrics import evaluate
+            evaluate([scene.model_path])
+            results_path = os.path.join(scene.model_path, "results.json")
+            if not os.path.isfile(results_path):
+                raise RuntimeError("metrics.py did not produce results.json")
+            with open(results_path, "r") as results_file:
+                evaluation_results = json.load(results_file)
+            method_results = evaluation_results.get(f"ours_{opt.iterations}", {})
+            if not all(name in method_results for name in ("PSNR", "SSIM", "LPIPS")):
+                raise RuntimeError("metrics.py did not produce PSNR/SSIM/LPIPS")
+            write_evaluation_status("complete", "Evaluation complete",
+                                    f"{len(test_cameras)} test views")
+            print("Automatic evaluation complete.")
+        except Exception as evaluation_error:
+            write_evaluation_status("failed", "Evaluation failed",
+                                    str(evaluation_error))
+            print("Automatic evaluation failed:", evaluation_error)
+    elif web_viewer is not None:
+        write_evaluation_status(
+            "skipped", "Evaluation skipped",
+            "No test cameras. Enable Evaluation split before starting training."
+        )
+
+    # Keep the CUDA scene alive as an interactive final-result viewer.  The
+    # persistent launcher can still terminate this process with its Stop button.
+    if web_viewer is not None:
+        print("Training complete. Final web viewer remains interactive; use Stop to close it.")
+        final_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+        current_view_iteration = opt.iterations
+        last_view_signature = None
+        while True:
+            settings = _merged_web_settings(web_viewer, web_settings_path)
+            if settings.get("close_viewer", False):
+                break
+            camera_index = max(0, min(
+                len(web_cameras) - 1, int(settings.get("camera_index", 0))
+            ))
+            requested_iteration = int(settings.get("checkpoint_iteration", -1))
+            if requested_iteration < 0:
+                requested_iteration = opt.iterations
+            if requested_iteration != current_view_iteration:
+                point_dir = os.path.join(
+                    scene.model_path, "point_cloud", f"iteration_{requested_iteration}"
+                )
+                spec_dir = os.path.join(
+                    scene.model_path, "specular", f"iteration_{requested_iteration}"
+                )
+                ply_path = os.path.join(point_dir, "point_cloud.ply")
+                asg_path = os.path.join(point_dir, "asg.pt")
+                spec_path = os.path.join(spec_dir, "specular.pth")
+                required_paths = (ply_path, asg_path, spec_path) if use_asg else (ply_path,)
+                if all(os.path.isfile(path) for path in required_paths):
+                    gaussians.load_ply(ply_path)
+                    if use_asg:
+                        gaussians._features_asg = torch.load(
+                            asg_path, map_location="cuda"
+                        ).cuda()
+                        specular_mlp.load_weights(
+                            scene.model_path, iteration=requested_iteration
+                        )
+                    current_view_iteration = requested_iteration
+                    final_target = gaussians.get_xyz.detach().mean(dim=0).cpu().numpy()
+                    last_view_signature = None
+                else:
+                    requested_iteration = current_view_iteration
+            signature = (
+                requested_iteration, str(settings.get("rgb_component", "render")),
+                camera_index, float(settings.get("yaw", 0.0)),
+                float(settings.get("pitch", 0.0)), float(settings.get("roll", 0.0)),
+                float(settings.get("zoom", 1.0)), float(settings.get("fov_scale", 1.2)),
+                float(settings.get("splat_scale", 1.35)),
+                float(settings.get("geometry_opacity", 0.72)),
+            )
+            if signature != last_view_signature:
+                web_base_camera = web_cameras[camera_index]
+                torch.cuda.synchronize()
+                allocated_mib = torch.cuda.memory_allocated() / (1024 ** 2)
+                reserved_mib = torch.cuda.memory_reserved() / (1024 ** 2)
+                gaussian_count = int(gaussians.get_xyz.shape[0])
+                with torch.no_grad():
+                    rgb_jpeg, geometry_jpeg, _ = _render_web_pair(
+                        web_base_camera, final_target, settings,
+                        opt.web_width, opt.web_height, gaussians,
+                        specular_mlp, pipe, background, opt.mult,
+                        use_asg and current_view_iteration > opt.specular_start_iter,
+                    )
+                web_viewer.publish(
+                    current_view_iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg,
+                )
+                _write_web_live(
+                    web_live_dir, current_view_iteration, gaussian_count, allocated_mib,
+                    reserved_mib, rgb_jpeg, geometry_jpeg, phase="final",
+                )
+                last_view_signature = signature
+            time.sleep(0.05)
 
 # ============================================================
 # UTILS
@@ -671,8 +1277,26 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument(
+        "--disable_asg", action="store_true",
+        help="Train a true SH-only ablation and persist use_asg=False in cfg_args."
+    )
+    parser.add_argument("--disable_vcd", action="store_true",
+                        help="Use vanilla 3DGS gradient densification instead of VCD.")
+    parser.add_argument("--disable_vcp", action="store_true",
+                        help="Disable periodic multi-view contribution pruning.")
+    parser.add_argument("--disable_compact_box", action="store_true",
+                        help="Use beta=1.0 instead of the Compact Box beta.")
+    parser.add_argument("--disable_multiview_contribution", action="store_true",
+                        help="Disable VCD, VCP, and Compact Box as one module.")
 
     args = parser.parse_args()
+    args.use_asg = not args.disable_asg
+    args.use_vcd = not (args.disable_vcd or args.disable_multiview_contribution)
+    args.use_vcp = not (args.disable_vcp or args.disable_multiview_contribution)
+    args.use_compact_box = not (
+        args.disable_compact_box or args.disable_multiview_contribution
+    )
 
     safe_state(False)
 

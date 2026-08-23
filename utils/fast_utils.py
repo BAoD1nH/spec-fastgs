@@ -7,6 +7,16 @@ import torchvision.transforms as transforms
 import random
 
 
+def prior_to_cuda(prior, dtype=torch.float32):
+    """Decode a compact CPU uint8 prior only for the camera in use."""
+    if prior is None:
+        return None
+    result = prior.to(device="cuda", dtype=dtype, non_blocking=True)
+    if prior.dtype == torch.uint8:
+        result = result / 255.0
+    return result
+
+
 def sampling_cameras(my_viewpoint_stack, num_cams=10):
     ''' Randomly sample a given number of cameras from the viewpoint stack'''
 
@@ -79,11 +89,10 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY, i
         get_flag = True
         l1_loss_norm = get_loss(render_image, gt_image)
             
-        metric_map = (l1_loss_norm > args.loss_thresh).int()
+        weighted_error = l1_loss_norm
 
         # Ref-score guides FastGS ADC; it does not spawn Gaussians by itself.
         use_ref_score = False
-        ref_score_threshold = getattr(args, 'refscore_threshold_min', 0.5)
         if (getattr(args, 'use_ref_score', False) and hasattr(my_viewpoint_cam, 'ref_score')
                 and iteration is not None and not getattr(args, 'disable_ref_score', False)):
             if iteration % args.densification_refscore_interval == 0:
@@ -94,14 +103,14 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY, i
                     decay_power = getattr(args, 'refscore_decay_power', 1.0)
                     min_strength = getattr(args, 'refscore_min_strength', 0.15)
                     strength = max((1.0 - ratio) ** decay_power, min_strength)
-                    threshold_min = getattr(args, 'refscore_threshold_min', 0.5)
-                    threshold_max = getattr(args, 'refscore_threshold_max', 0.9)
-                    ref_score_threshold = threshold_min + (1.0 - strength) * (threshold_max - threshold_min)
                     use_ref_score = True
 
         if use_ref_score:
-            ref_mask = (my_viewpoint_cam.ref_score.cuda() > ref_score_threshold).int()
-            metric_map = torch.max(metric_map, ref_mask)
+            ref_score = prior_to_cuda(my_viewpoint_cam.ref_score, l1_loss_norm.dtype)
+            ref_weight = float(getattr(args, 'refscore_strength', 0.5)) * strength
+            weighted_error = l1_loss_norm * (1.0 + ref_weight * ref_score)
+
+        metric_map = (weighted_error > args.loss_thresh).int()
 
         render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
 
