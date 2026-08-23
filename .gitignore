@@ -2,6 +2,7 @@
 output/
 datasets/
 models/
+.cache/
 
 # Bỏ qua các file rác của Python
 __pycache__/

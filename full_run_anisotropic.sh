@@ -2,7 +2,7 @@
 
 #1. Teapot
 python extract_reflection_prior.py \
-    -s datasets/Anisotropic-Synthesis/teapot \
+    -s datasets/anisotropic-synthetic/teapot \
     --eval \
     --white_background \
     --data_device cpu \
@@ -11,7 +11,7 @@ python extract_reflection_prior.py \
     --ti_bright 0.60
 
 python train.py \
-    -s datasets/Anisotropic-Synthesis/teapot \
+    -s datasets/anisotropic-synthetic/teapot \
     -m output/anisotropic_synthetic/teapot \
     --eval \
     --white_background \
@@ -28,17 +28,17 @@ python train.py \
     # --disable_asg 
     # --disable_multiview_contribution
 
-python render.py -s datasets/Anisotropic-Synthesis/teapot -m output/anisotropic_synthetic/teapot --iteration 30000 --skip_train --data_device cpu
+python render.py -s datasets/anisotropic-synthetic/teapot -m output/anisotropic_synthetic/teapot --iteration 30000 --skip_train --data_device cpu
 
 python metrics.py -m output/anisotropic_synthetic/teapot
 
 # #2. record
 
-# python render.py -s datasets/Anisotropic-Synthesis/record -m output/anisotropic_synthetic/record --iteration 30000 --skip_train --data_device cpu
+# python render.py -s datasets/anisotropic-synthetic/record -m output/anisotropic_synthetic/record --iteration 30000 --skip_train --data_device cpu
 
 # python metrics.py -m output/anisotropic_synthetic/record
 
 # #3. plane
-# python render.py -s ../spec-fastgs/datasets/Anisotropic-Synthesis/plane -m output/anisotropic_synthetic/plane --iteration 30000 --skip_train --data_device cpu
+# python render.py -s ../spec-fastgs/datasets/anisotropic-synthetic/plane -m output/anisotropic_synthetic/plane --iteration 30000 --skip_train --data_device cpu
 
 # python metrics.py -m output/anisotropic_synthetic/plane

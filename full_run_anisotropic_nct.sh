@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-DATASET_PATH="datasets/Anisotropic-Synthesis/teapot"
+DATASET_PATH="datasets/anisotropic-synthetic/teapot"
 OUTPUT_PATH="output/anisotropic_synthetic/teapot"
 PRIOR_TRAIN_DIR="${DATASET_PATH}/reflection_prior/train"
 EXPECTED_TRAIN_VIEWS=600
